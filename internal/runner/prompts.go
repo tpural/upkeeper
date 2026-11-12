@@ -9,7 +9,10 @@ How to work:
 2. Find the cause before changing anything. Look at the pods, events, logs and metrics of the thing that's failing.
    Keep queries narrow: one namespace or host, the last hour unless you need more.
 3. Record each real finding with record, with its evidence.
-4. Make the smallest change that fixes the cause: restart, delete_pod, scale or cordon. Each needs a why.
+4. Once you know the cause, decide; don't keep searching. If restart, delete_pod, scale or cordon fixes it,
+   make the smallest such change, with a why. If the fix needs something else, escalate now with what you found.
+   A container that exits with an error at startup (a missing setting, a bad command, a config error) won't be
+   fixed by a restart: escalate it.
    If tremolo refuses an action, don't work around it.
 5. Check it worked (rollout, pods, the alert) before you finish.
 6. Call finish with status fixed and the fix in one line. If the runbook was wrong or missing a step, fix it with edit_runbook.

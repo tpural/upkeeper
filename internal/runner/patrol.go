@@ -6,6 +6,8 @@ import (
 	"slices"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/tpural/upkeeper/internal/agent"
 	"github.com/tpural/upkeeper/internal/patrol"
 	"github.com/tpural/upkeeper/internal/tremolo"
@@ -55,6 +57,8 @@ func (r *Runner) openFinding(ctx context.Context, f patrol.Finding) (bool, error
 // patrol has the model look around with read-only tools.
 func (r *Runner) patrol(ctx context.Context) {
 	r.lastPatrol = r.Now()
+	ctx, span := r.start(ctx, "patrol", attribute.String("upkeeper.task", "patrol"))
+	defer span.End()
 	tools, done, err := r.Toolbox(ctx, nil)
 	if err != nil {
 		r.fail("getting patrol tools", err)
@@ -102,6 +106,8 @@ func (r *Runner) patrol(ctx context.Context) {
 	case res.Ended == "":
 		said = "stopped: " + res.Stopped
 	}
+	span.SetAttributes(attribute.Int("upkeeper.steps", res.Steps), attribute.Int("gen_ai.usage.total_tokens", res.Tokens),
+		attribute.Int("upkeeper.opened", opened), attribute.String("upkeeper.outcome", clip(said, 1000)))
 	r.Log.Info("patrol done", "opened", opened, "steps", res.Steps, "said", clip(said, 500))
 	r.Metrics.Patrols.Inc()
 	r.set(func(s *Status) { s.LastPatrol, s.PatrolSaid = r.Now(), clip(said, 1000) })

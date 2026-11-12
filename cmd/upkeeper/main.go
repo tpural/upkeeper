@@ -17,6 +17,13 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -77,11 +84,18 @@ func run() error {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
+	tracer, flush, err := tracing(cfg)
+	if err != nil {
+		return err
+	}
+	defer flush()
+
 	checks := &patrol.Checker{K: k, Coverage: t.Coverage, AsleepTaints: []string{"possum.dev/asleep"}}
 	r := &runner.Runner{
 		Config:  cfg,
 		T:       t,
-		Agent:   &agent.Agent{Model: llm.New(cfg.Model.URL, cfg.Model.Name), Log: log, Budget: 90_000},
+		Agent:   &agent.Agent{Model: llm.New(cfg.Model.URL, cfg.Model.Name), ModelName: cfg.Model.Name, Log: log, Tracer: tracer, Budget: 90_000},
+		Tracer:  tracer,
 		Toolbox: runner.NewToolbox(t, c, version),
 		Checks:  checks.Check,
 		Log:     log,
@@ -118,6 +132,28 @@ func run() error {
 	defer cancel()
 	_ = srv.Shutdown(shutdown)
 	return err
+}
+
+// tracing returns a tracer sending to cfg.Traces, or one that sends nothing.
+func tracing(cfg config.Config) (trace.Tracer, func(), error) {
+	if cfg.Traces.URL == "" {
+		return noop.NewTracerProvider().Tracer(""), func() {}, nil
+	}
+	opts := []otlptracehttp.Option{otlptracehttp.WithEndpointURL(strings.TrimRight(cfg.Traces.URL, "/") + "/v1/traces")}
+	if cfg.Traces.Token != "" {
+		opts = append(opts, otlptracehttp.WithHeaders(map[string]string{"Authorization": "Bearer " + cfg.Traces.Token}))
+	}
+	exp, err := otlptracehttp.New(context.Background(), opts...)
+	if err != nil {
+		return nil, nil, err
+	}
+	res := resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceName("upkeeper"), semconv.ServiceVersion(version))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exp), sdktrace.WithResource(res))
+	return tp.Tracer("github.com/tpural/upkeeper"), func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tp.Shutdown(ctx)
+	}, nil
 }
 
 func kubeConfig(path string) (*rest.Config, error) {
