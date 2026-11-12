@@ -138,8 +138,13 @@ func TestHopeless(t *testing.T) {
 		dep("oom"), pod("oom-1", corev1.ContainerStatus{Name: "c", LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled"}}}, false),
 		dep("wed"), pod("wed-1", corev1.ContainerStatus{Name: "c", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}, false),
 		pod("wed-2", corev1.ContainerStatus{Name: "c", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}, true),
+		dep("prb"), pod("prb-1", corev1.ContainerStatus{Name: "c", RestartCount: 6, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}, false),
+		&corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{Name: "e", Namespace: "a"}, Type: "Warning", Reason: "Unhealthy", LastTimestamp: metav1.Now(),
+			Message: "Liveness probe failed: connection refused", InvolvedObject: corev1.ObjectReference{Kind: "Pod", Namespace: "a", Name: "prb-1"},
+		},
 	), Now: time.Now}
-	for name, want := range map[string]string{"tag": "c is ImagePullBackOff", "oom": "OOMKilled by its own memory limit", "wed": ""} {
+	for name, want := range map[string]string{"tag": "c is ImagePullBackOff", "oom": "OOMKilled by its own memory limit", "wed": "", "prb": "restarted it 6 times for failing its liveness probe"} {
 		why, err := c.Hopeless(ctx, "a", "deployment", name)
 		if err != nil || want == "" && why != "" || want != "" && !strings.Contains(why, want) {
 			t.Errorf("%s: %q, %v", name, why, err)
