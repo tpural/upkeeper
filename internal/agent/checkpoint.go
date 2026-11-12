@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -21,6 +22,8 @@ type Checkpoint struct {
 	Missing string `json:"missing"`
 	Next    string `json:"next"`
 	LookAt  string `json:"look_at"`
+	// Tool is the one tool it'll use for LookAt.
+	Tool string `json:"tool,omitempty"`
 	// Query is what to search the web for, when Next is search.
 	Query string `json:"query,omitempty"`
 }
@@ -60,7 +63,7 @@ type JSONChatter interface {
 	ChatJSON(ctx context.Context, msgs []llm.Message, schema json.RawMessage) (llm.Message, llm.Usage, error)
 }
 
-func checkpointPrompt(choices []Choice, why string) string {
+func checkpointPrompt(choices []Choice, why string, tools []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Stop and step back (%s). Don't call a tool. Answer only with a JSON object:\n", why)
 	b.WriteString(`- "known": what you've found so far, with the evidence;` + "\n")
@@ -71,6 +74,7 @@ func checkpointPrompt(choices []Choice, why string) string {
 		fmt.Fprintf(&b, "    %q: %s;\n", c.Name, c.Meaning)
 	}
 	b.WriteString(`- "look_at": for a choice that continues, exactly what to do next.` + "\n")
+	fmt.Fprintf(&b, `- "tool": for look or fix, the one tool you'll use: one of %s, or "none" if none of them can do it (then choose escalate).`+"\n", strings.Join(tools, ", "))
 	for _, c := range choices {
 		if c.Name == SearchChoice.Name {
 			b.WriteString(`- "query": for search, the web query.` + "\n")
@@ -80,34 +84,26 @@ func checkpointPrompt(choices []Choice, why string) string {
 	return b.String()
 }
 
-func checkpointSchema(choices []Choice) json.RawMessage {
+func checkpointSchema(choices []Choice, tools []string) json.RawMessage {
 	names := make([]string, len(choices))
 	for i, c := range choices {
 		names[i] = c.Name
 	}
 	enum, _ := json.Marshal(names)
+	toolEnum, _ := json.Marshal(append(slices.Clone(tools), "none"))
 	return json.RawMessage(`{"type":"object","properties":{"known":{"type":"string"},"tried":{"type":"string"},"missing":{"type":"string"},` +
-		`"next":{"type":"string","enum":` + string(enum) + `},"look_at":{"type":"string"},"query":{"type":"string"}},"required":["known","tried","missing","next"]}`)
+		`"next":{"type":"string","enum":` + string(enum) + `},"look_at":{"type":"string"},"tool":{"type":"string","enum":` + string(toolEnum) + `},"query":{"type":"string"}},"required":["known","tried","missing","next"]}`)
 }
 
 // unreachable reports whether a checkpoint that continues asks for something
 // none of the tools can do: a small model will then go round in circles
 // looking for a way.
 func unreachable(c Checkpoint, tools []string) bool {
-	if c.Next == SearchChoice.Name {
-		return false
-	}
-	text := strings.ToLower(c.LookAt)
-	for _, t := range tools {
-		if strings.Contains(text, strings.ToLower(t)) {
-			return false
-		}
-	}
-	return true
+	return c.Next != SearchChoice.Name && !slices.Contains(tools, strings.TrimSpace(c.Tool))
 }
 
 // checkpoint asks the model to step back, as a chat span marked as one.
-func (a *Agent) checkpoint(ctx context.Context, tracer trace.Tracer, msgs []llm.Message, choices []Choice, why string, res *Result) (Checkpoint, error) {
+func (a *Agent) checkpoint(ctx context.Context, tracer trace.Tracer, msgs []llm.Message, choices []Choice, tools []string, why string, res *Result) (Checkpoint, error) {
 	ctx, span := tracer.Start(ctx, "chat "+a.ModelName, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(
 		attribute.String("gen_ai.operation.name", "chat"),
 		attribute.String("gen_ai.request.model", a.ModelName),
@@ -116,7 +112,7 @@ func (a *Agent) checkpoint(ctx context.Context, tracer trace.Tracer, msgs []llm.
 		attribute.Int("upkeeper.step", res.Steps+1),
 	))
 	defer span.End()
-	ask := append(append([]llm.Message(nil), msgs...), llm.Message{Role: "user", Content: checkpointPrompt(choices, why)})
+	ask := append(append([]llm.Message(nil), msgs...), llm.Message{Role: "user", Content: checkpointPrompt(choices, why, tools)})
 	var c Checkpoint
 	var last error
 	for range 2 {
@@ -124,7 +120,7 @@ func (a *Agent) checkpoint(ctx context.Context, tracer trace.Tracer, msgs []llm.
 		var u llm.Usage
 		var err error
 		if j, ok := a.Model.(JSONChatter); ok {
-			m, u, err = j.ChatJSON(ctx, ask, checkpointSchema(choices))
+			m, u, err = j.ChatJSON(ctx, ask, checkpointSchema(choices, tools))
 		} else {
 			m, u, err = a.Model.Chat(ctx, ask, nil)
 		}
@@ -151,6 +147,7 @@ func (a *Agent) checkpoint(ctx context.Context, tracer trace.Tracer, msgs []llm.
 		attribute.String("upkeeper.checkpoint.missing", c.Missing),
 		attribute.String("upkeeper.checkpoint.next", c.Next),
 		attribute.String("upkeeper.checkpoint.look_at", c.LookAt),
+		attribute.String("upkeeper.checkpoint.tool", c.Tool),
 	)
 	return c, nil
 }

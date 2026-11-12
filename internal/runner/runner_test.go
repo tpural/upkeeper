@@ -179,7 +179,7 @@ func newRunner(t *testing.T, f *fakeTremolo, model *replies, awake *bool) (*Runn
 		Agent:   &agent.Agent{Model: model, Log: slog.New(slog.DiscardHandler)},
 		Metrics: NewMetrics(nil),
 		Awake:   func(context.Context) (bool, error) { return *awake, nil },
-		Toolbox: func(_ context.Context, inv *tremolo.Investigation) ([]agent.Tool, func(), error) {
+		Toolbox: func(_ context.Context, inv *tremolo.Investigation, _ *actionLog) ([]agent.Tool, func(), error) {
 			tools := []agent.Tool{{Name: "pods", Params: schema(""), Run: func(context.Context, map[string]any) (string, error) { return "all good", nil }}}
 			if inv != nil {
 				tools = append(tools, agent.Tool{Name: "record", Params: schema(""), Run: func(context.Context, map[string]any) (string, error) { return "Recorded.", nil }})
@@ -318,7 +318,8 @@ func TestActions(t *testing.T) {
 	tc, _ := tremolo.New(srv.URL, "tok", "upkeeper")
 	k := fake.NewClientset(&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "gridtie", Namespace: "gridtie"}})
 	c := cluster.New(k)
-	restart := clusterActions(c, tc, 9)[0]
+	log := &actionLog{}
+	restart := clusterActions(c, tc, 9, log)[0]
 
 	out, err := restart.Run(context.Background(), map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie", "why": "stuck on old DNS"})
 	if err != nil || !strings.HasPrefix(out, "Done.") {
@@ -345,6 +346,12 @@ func TestActions(t *testing.T) {
 	d, _ = k.AppsV1().Deployments("gridtie").Get(context.Background(), "gridtie", metav1.GetOptions{})
 	if err != nil || !strings.Contains(out, "tremolo refused this: tremolo: 409: over the disruptive budget") || len(asked) != 1 || d.Spec.Template.Annotations != nil {
 		t.Errorf("refused: %q %v, asked %v, annotations %v", out, err, asked, d.Spec.Template.Annotations)
+	}
+
+	// Never to zero.
+	scale := clusterActions(c, tc, 9, log)[2]
+	if _, err := scale.Run(context.Background(), map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie", "replicas": 0.0, "why": "prepare"}); err == nil {
+		t.Error("scaled to 0")
 	}
 
 	// No why, no action.
@@ -415,5 +422,22 @@ func TestDecideAndPast(t *testing.T) {
 		if !strings.Contains(first, want) {
 			t.Errorf("brief lacks %q:\n%s", want, first)
 		}
+	}
+}
+
+func TestRefusedFix(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeTremolo{}
+	awake := true
+	r, _ := newRunner(t, f, &replies{}, &awake)
+	inv := tremolo.Investigation{ID: 7, Kind: "incident", Title: "api"}
+	actions := &actionLog{changed: []string{"scale to 0 deployment/x (why: prepare)"}, refused: []string{"delete pod pod/api-1: over budget"}}
+	res := agent.Result{Ended: "finish", Answer: `{"status":"abandoned","summary":"Hit the action limit."}`}
+	if got := r.finish(ctx, inv, res, nil, nil, actions, nil); got != "escalated" {
+		t.Errorf("outcome %q", got)
+	}
+	want := "escalate 7 upkeeper found what to do but wasn't allowed to. Hit the action limit. upkeeper changed: scale to 0 deployment/x (why: prepare). tremolo refused: delete pod pod/api-1: over budget."
+	if got := f.took(); got != want {
+		t.Errorf("did %q\nwant %q", got, want)
 	}
 }

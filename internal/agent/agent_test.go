@@ -139,7 +139,7 @@ func TestCheckpoint(t *testing.T) {
 	m := &script{replies: []llm.Message{
 		call("logs", `{"query":"orders DATABASE_URL","start":"1h"}`),
 		call("logs", `{"query":"orders config","start":"1h"}`),
-		say(`Sure: {"known":"exits: DATABASE_URL is not set","tried":"logs","missing":"which secret","next":"look","look_at":"pods in orders"}`),
+		say(`Sure: {"known":"exits: DATABASE_URL is not set","tried":"logs","missing":"which secret","next":"look","look_at":"pods in orders","tool":"pods"}`),
 		call("pods", `{"namespace":"orders"}`),
 		call("finish", `{"fix":"nothing"}`),
 	}}
@@ -157,7 +157,7 @@ func TestCheckpoint(t *testing.T) {
 
 	// Four empty answers in a row; then at most two checkpoints, and a third
 	// time round it's stopped.
-	look := say(`{"known":"k","tried":"t","missing":"m","next":"look","look_at":"pods, then logs with a wider start"}`)
+	look := say(`{"known":"k","tried":"t","missing":"m","next":"look","look_at":"pods, then logs with a wider start","tool":"pods"}`)
 	var replies []llm.Message
 	for i := range 4 {
 		replies = append(replies, call("logs", fmt.Sprintf(`{"start":"%dh"}`, i+1)))
@@ -229,7 +229,7 @@ func TestUnreachable(t *testing.T) {
 	same := call("pods", `{"namespace":"a"}`)
 	a := &Agent{Model: &script{replies: []llm.Message{
 		same, same,
-		say(`{"known":"SMTP_HOST isn't set","tried":"pods","missing":"is there an SMTP secret","next":"look","look_at":"kubectl get secrets in the namespace"}`),
+		say(`{"known":"SMTP_HOST isn't set","tried":"pods","missing":"is there an SMTP secret","next":"look","look_at":"kubectl get secrets in the namespace","tool":"none"}`),
 	}}, Log: slog.New(slog.DiscardHandler)}
 	res, _ := a.Run(context.Background(), Task{Tools: tools(&calls), MaxSteps: 10})
 	if res.Decided != "escalate" || len(res.Notes) != 1 || res.Notes[0] != "It wanted to kubectl get secrets in the namespace, which none of its tools can do." {

@@ -117,15 +117,28 @@ func clusterReads(c *cluster.Cluster) []agent.Tool {
 	}
 }
 
-// clusterActions are the Kubernetes changes, each asked of tremolo first.
-func clusterActions(c *cluster.Cluster, t *tremolo.Client, inv int64) []agent.Tool {
-	act := func(ctx context.Context, a tremolo.Action, do func() error) (string, error) {
+// actionLog is what a run's actions did, for its escalation.
+type actionLog struct {
+	changed, refused []string
+}
+
+// cantFix is what replacing pods can't fix, for the tools' descriptions.
+const cantFix = " It can't fix a wrong image or tag, missing config or env, a memory limit that's too low, the wrong CPU architecture, or scheduling: escalate those. Disruptive."
+
+// clusterActions are the Kubernetes changes. Each is checked before it's asked
+// of tremolo: its arguments, and whether a fresh pod could fix what's wrong.
+func clusterActions(c *cluster.Cluster, t *tremolo.Client, inv int64, log *actionLog) []agent.Tool {
+	act := func(ctx context.Context, a tremolo.Action, check func() error, do func() error) (string, error) {
 		if strings.TrimSpace(a.Why) == "" {
 			return "", errors.New("say why: what you found that this should fix")
 		}
+		if err := check(); err != nil {
+			return "", err
+		}
 		ev, err := t.BeginAction(ctx, inv, a)
 		if tremolo.Refused(err) {
-			return "tremolo refused this: " + err.Error() + ". Don't try to work around it; find another way, or escalate.", nil
+			log.refused = append(log.refused, fmt.Sprintf("%s %s: %s", a.Action, a.Target, err))
+			return "tremolo refused this: " + err.Error() + ". Don't try to work around it; escalate, saying what you'd have done.", nil
 		}
 		if err != nil {
 			return "", agent.Fatal{Err: err}
@@ -140,34 +153,71 @@ func clusterActions(c *cluster.Cluster, t *tremolo.Client, inv int64) []agent.To
 		if result != "done" {
 			return "", errors.New(strings.TrimPrefix(result, "failed: "))
 		}
+		where := a.Target
+		if a.Namespace != "" {
+			where = a.Namespace + "/" + a.Target
+		}
+		log.changed = append(log.changed, fmt.Sprintf("%s %s (why: %s)", a.Action, where, clip(a.Why, 200)))
 		return "Done. Check that it worked (rollout, pods, or the alert) before you finish.", nil
+	}
+	// fresh refuses replacing pods that would come back with the same problem.
+	fresh := func(ctx context.Context, ns, kind, name string) func() error {
+		return func() error {
+			why, err := c.Hopeless(ctx, ns, kind, name)
+			if err != nil {
+				return err
+			}
+			if why != "" {
+				return errors.New("not done: a new pod can't fix this, " + why + ". Escalate it, saying what you found")
+			}
+			return nil
+		}
+	}
+	kinds := func(kind string, allowed ...string) error {
+		if !slices.Contains(allowed, kind) {
+			return fmt.Errorf("kind must be one of %s", strings.Join(allowed, ", "))
+		}
+		return nil
 	}
 	return []agent.Tool{
 		{
-			Name: "restart", Description: "Roll a workload's pods (kubectl rollout restart). Disruptive.",
-			Params: schema(pNamespace+","+pKind+","+pName+","+pWhy, "namespace", "kind", "name", "why"),
+			Name:        "restart",
+			Description: "Roll a workload's pods (kubectl rollout restart). Fixes a process that's wedged, deadlocked or stuck on stale state, in every pod." + cantFix,
+			Params:      schema(pNamespace+","+pKind+","+pName+","+pWhy, "namespace", "kind", "name", "why"),
 			Run: func(ctx context.Context, a map[string]any) (string, error) {
 				ns, kind, name := str(a, "namespace"), str(a, "kind"), str(a, "name")
+				if err := kinds(kind, "deployment", "statefulset", "daemonset"); err != nil {
+					return "", err
+				}
 				return act(ctx, tremolo.Action{Action: "rollout restart", Namespace: ns, Target: kind + "/" + name, Disruptive: true, Why: str(a, "why")},
-					func() error { return c.Restart(ctx, ns, kind, name) })
+					fresh(ctx, ns, kind, name), func() error { return c.Restart(ctx, ns, kind, name) })
 			},
 		},
 		{
-			Name: "delete_pod", Description: "Delete one pod so its controller replaces it, e.g. one stuck pod of several. Disruptive.",
-			Params: schema(pNamespace+`,"name":{"type":"string","description":"the pod's name"},`+pWhy, "namespace", "name", "why"),
+			Name:        "delete_pod",
+			Description: "Delete one pod so its controller makes a fresh one. Fixes one wedged or stuck pod while the others are fine." + cantFix,
+			Params:      schema(pNamespace+`,"name":{"type":"string","description":"the pod's name"},`+pWhy, "namespace", "name", "why"),
 			Run: func(ctx context.Context, a map[string]any) (string, error) {
 				ns, name := str(a, "namespace"), str(a, "name")
 				return act(ctx, tremolo.Action{Action: "delete pod", Namespace: ns, Target: "pod/" + name, Disruptive: true, Why: str(a, "why")},
-					func() error { return c.DeletePod(ctx, ns, name) })
+					fresh(ctx, ns, "pod", name), func() error { return c.DeletePod(ctx, ns, name) })
 			},
 		},
 		{
-			Name: "scale", Description: "Set a deployment's or statefulset's replicas (0 to 10). Disruptive.",
-			Params: schema(pNamespace+`,"kind":{"type":"string","enum":["deployment","statefulset"]},`+pName+`,"replicas":{"type":"integer"},`+pWhy, "namespace", "kind", "name", "replicas", "why"),
+			Name: "scale",
+			Description: "Set a deployment's or statefulset's replicas, 1 to 10, when it runs too few for its load or was scaled down by mistake. " +
+				"Not a way to restart, and never to stop a broken app. Disruptive.",
+			Params: schema(pNamespace+`,"kind":{"type":"string","enum":["deployment","statefulset"]},`+pName+`,"replicas":{"type":"integer","minimum":1,"maximum":10},`+pWhy, "namespace", "kind", "name", "replicas", "why"),
 			Run: func(ctx context.Context, a map[string]any) (string, error) {
 				ns, kind, name, n := str(a, "namespace"), str(a, "kind"), str(a, "name"), int32(num(a, "replicas"))
+				if err := kinds(kind, "deployment", "statefulset"); err != nil {
+					return "", err
+				}
+				if n < 1 || n > 10 {
+					return "", errors.New("replicas must be 1 to 10: taking an app down isn't yours to do; escalate instead")
+				}
 				return act(ctx, tremolo.Action{Action: fmt.Sprintf("scale to %d", n), Namespace: ns, Target: kind + "/" + name, Disruptive: true, Why: str(a, "why")},
-					func() error { return c.Scale(ctx, ns, kind, name, n) })
+					func() error { return nil }, func() error { return c.Scale(ctx, ns, kind, name, n) })
 			},
 		},
 		{
@@ -180,7 +230,7 @@ func clusterActions(c *cluster.Cluster, t *tremolo.Client, inv int64) []agent.To
 					verb = "cordon"
 				}
 				return act(ctx, tremolo.Action{Action: verb, Host: node, Target: "node/" + node, Why: str(a, "why")},
-					func() error { return c.Cordon(ctx, node, on) })
+					func() error { return nil }, func() error { return c.Cordon(ctx, node, on) })
 			},
 		},
 	}
