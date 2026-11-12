@@ -448,3 +448,14 @@ func TestRefusedFix(t *testing.T) {
 		t.Errorf("did %q\nwant %q", got, want)
 	}
 }
+
+func TestSettledFix(t *testing.T) {
+	f := &fakeTremolo{}
+	awake := true
+	r, _ := newRunner(t, f, &replies{}, &awake)
+	actions := &actionLog{changed: []string{"delete pod a/pod/api-1 (why: wedged)"}, settled: "deployment a/api has 2/2 ready after 20s."}
+	got := r.finish(context.Background(), tremolo.Investigation{ID: 8, Kind: "incident"}, agent.Result{Stopped: "kept repeating pods"}, nil, nil, actions, nil)
+	if want := "close 8 fixed delete pod a/pod/api-1 (why: wedged)"; got != "fixed" || f.took() != want {
+		t.Errorf("outcome %q", got)
+	}
+}

@@ -392,6 +392,12 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 		escalate(why)
 		r.keepSources(ctx, inv, e.Sources, refs, "", "escalated", e.Why)
 		return "escalated"
+	case res.Ended == "" && actions.settled != "" && len(actions.refused) == 0:
+		// It made a change and the workload came back ready, then didn't say
+		// so: the change is the fix, on the cluster's word rather than the model's.
+		fix := actions.changed[len(actions.changed)-1]
+		r.close(ctx, inv.ID, "fixed", "upkeeper's change worked: "+actions.settled+" The model didn't finish on its own ("+res.Stopped+").", fix, "")
+		return "fixed"
 	case res.Decided != "" && res.Checkpoint != nil:
 		// It stepped back and decided a person should take this.
 		escalate(strings.Join(append([]string{"upkeeper stepped back and decided to hand this over. " + res.Checkpoint.Summary()}, res.Notes...), " "))

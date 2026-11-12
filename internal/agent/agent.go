@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -93,6 +94,20 @@ type Agent struct {
 	// Budget is roughly how many characters of conversation to keep; older
 	// tool answers are dropped past it.
 	Budget int
+	// Now is the clock; nil is time.Now.
+	Now func() time.Time
+
+	lastAt map[string]time.Time
+}
+
+// Fresh is how long after a call the same call isn't a repeat.
+const Fresh = time.Minute
+
+func (a *Agent) now() time.Time {
+	if a.Now != nil {
+		return a.Now()
+	}
+	return time.Now()
 }
 
 // When the model is stepped back, and when it's stopped.
@@ -124,7 +139,8 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 	}
 	msgs := []llm.Message{{Role: "system", Content: t.System}, {Role: "user", Content: t.User}}
 	var res Result
-	seen := map[string]int{}    // exact calls
+	seen := map[string]int{} // exact calls
+	a.lastAt = map[string]time.Time{}
 	nothing := map[string]int{} // near-same calls that found nothing
 	idle, empty, checks := 0, 0, 0
 	searched := false
@@ -330,7 +346,12 @@ func (a *Agent) run(ctx context.Context, tools map[string]Tool, call llm.ToolCal
 		}
 	}
 	k := key(call)
+	// Looking again a while later is fair: the cluster moves on.
+	if at, ok := a.lastAt[k]; ok && a.now().Sub(at) >= Fresh {
+		seen[k] = 0
+	}
 	seen[k]++
+	a.lastAt[k] = a.now()
 	if seen[k] > 1 && !tl.Ends {
 		return repeated, false, nil
 	}
