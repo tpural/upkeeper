@@ -227,7 +227,19 @@ func clusterActions(c *cluster.Cluster, t *tremolo.Client, inv int64, log *actio
 					return "", errors.New("replicas must be 1 to 10: taking an app down isn't yours to do; escalate instead")
 				}
 				return act(ctx, tremolo.Action{Action: fmt.Sprintf("scale to %d", n), Namespace: ns, Target: kind + "/" + name, Disruptive: true, Why: str(a, "why")},
-					func() error { return nil }, func() error { return c.Scale(ctx, ns, kind, name, n) },
+					func() error {
+						have, err := c.Replicas(ctx, ns, kind, name)
+						switch {
+						case err != nil:
+							return err
+						case n == have:
+							return fmt.Errorf("not done: it already wants %d; scaling isn't a way to restart", n)
+						case n > have:
+							// More pods that can't start help nobody.
+							return fresh(ctx, ns, kind, name)()
+						}
+						return nil
+					}, func() error { return c.Scale(ctx, ns, kind, name, n) },
 					func() string { return c.Settle(ctx, ns, kind, name, settleFor) })
 			},
 		},
