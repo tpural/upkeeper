@@ -90,6 +90,22 @@ func checkpointSchema(choices []Choice) json.RawMessage {
 		`"next":{"type":"string","enum":` + string(enum) + `},"look_at":{"type":"string"},"query":{"type":"string"}},"required":["known","tried","missing","next"]}`)
 }
 
+// unreachable reports whether a checkpoint that continues asks for something
+// none of the tools can do: a small model will then go round in circles
+// looking for a way.
+func unreachable(c Checkpoint, tools []string) bool {
+	if c.Next == SearchChoice.Name {
+		return false
+	}
+	text := strings.ToLower(c.LookAt)
+	for _, t := range tools {
+		if strings.Contains(text, strings.ToLower(t)) {
+			return false
+		}
+	}
+	return true
+}
+
 // checkpoint asks the model to step back, as a chat span marked as one.
 func (a *Agent) checkpoint(ctx context.Context, tracer trace.Tracer, msgs []llm.Message, choices []Choice, why string, res *Result) (Checkpoint, error) {
 	ctx, span := tracer.Start(ctx, "chat "+a.ModelName, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(

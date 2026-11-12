@@ -154,10 +154,16 @@ func (c *Cluster) events(ctx context.Context, ns, selector string) (string, erro
 		return "", err
 	}
 	since := c.Now().Add(-time.Hour)
+	// Each object and reason, with its distinct messages: a generic one, like
+	// "Error: ImagePullBackOff", mustn't hide the one that says why.
+	type message struct {
+		n    int32
+		last time.Time
+	}
 	type group struct {
 		n    int32
 		last time.Time
-		text string
+		msgs map[string]*message
 	}
 	groups := map[string]*group{}
 	for i := range list.Items {
@@ -172,13 +178,19 @@ func (c *Cluster) events(ctx context.Context, ns, selector string) (string, erro
 		k := e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name + " " + e.Reason
 		g := groups[k]
 		if g == nil {
-			g = &group{}
+			g = &group{msgs: map[string]*message{}}
 			groups[k] = g
 		}
-		g.n += max(e.Count, 1)
-		if at.After(g.last) {
-			g.last, g.text = at, e.Message
+		n := max(e.Count, 1)
+		g.n += n
+		g.last = maxTime(g.last, at)
+		m := g.msgs[e.Message]
+		if m == nil {
+			m = &message{}
+			g.msgs[e.Message] = m
 		}
+		m.n += n
+		m.last = maxTime(m.last, at)
 	}
 	keys := make([]string, 0, len(groups))
 	for k := range groups {
@@ -192,9 +204,28 @@ func (c *Cluster) events(ctx context.Context, ns, selector string) (string, erro
 			break
 		}
 		g := groups[k]
-		fmt.Fprintf(&b, "%s ×%d, last %s ago: %s\n", k, g.n, age(c.Now(), g.last), clip(g.text, 250))
+		texts := make([]string, 0, len(g.msgs))
+		for t := range g.msgs {
+			texts = append(texts, t)
+		}
+		sort.Slice(texts, func(i, j int) bool { return g.msgs[texts[i]].last.After(g.msgs[texts[j]].last) })
+		if len(texts) == 1 {
+			fmt.Fprintf(&b, "%s ×%d, last %s ago: %s\n", k, g.n, age(c.Now(), g.last), clip(texts[0], 300))
+			continue
+		}
+		fmt.Fprintf(&b, "%s ×%d, last %s ago:\n", k, g.n, age(c.Now(), g.last))
+		for _, t := range texts[:min(len(texts), 3)] {
+			fmt.Fprintf(&b, "  - ×%d: %s\n", g.msgs[t].n, clip(t, 300))
+		}
 	}
 	return b.String(), nil
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 // Rollout says how a deployment, statefulset or daemonset is doing.
@@ -476,6 +507,18 @@ func (c *Cluster) Spec(ctx context.Context, ns, kind, name string) (string, erro
 		if ct.ReadinessProbe != nil || ct.LivenessProbe != nil {
 			fmt.Fprintf(&b, "  probes: %s\n", probes(ct))
 		}
+	}
+	if spec.ServiceAccountName != "" && spec.ServiceAccountName != "default" {
+		fmt.Fprintf(&b, "serviceAccount: %s\n", spec.ServiceAccountName)
+	}
+	if len(spec.ImagePullSecrets) > 0 {
+		var names []string
+		for _, s := range spec.ImagePullSecrets {
+			names = append(names, s.Name)
+		}
+		fmt.Fprintf(&b, "imagePullSecrets: %s\n", strings.Join(names, ", "))
+	} else {
+		b.WriteString("imagePullSecrets: none (a private registry would refuse the pull)\n")
 	}
 	if len(spec.NodeSelector) > 0 {
 		var sel []string
