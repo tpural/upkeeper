@@ -55,7 +55,7 @@ func TestCheck(t *testing.T) {
 	c := &Checker{
 		K: k, AsleepTaints: []string{"possum.dev/asleep"}, Now: func() time.Time { return now },
 		Coverage: func(context.Context) ([]tremolo.Gap, error) {
-			return []tremolo.Gap{{Kind: "logs", Subject: "namespace nfs", Detail: "no logs"}, {Kind: "check", Subject: "x", Detail: "failed"}}, nil
+			return []tremolo.Gap{{Kind: "logs", Subject: "namespace nfs", Detail: "no logs"}, {Kind: "check", Subject: "x", Detail: "failed"}, {Kind: "traces", Subject: "3 namespaces", Detail: "no traces"}}, nil
 		},
 	}
 	titles := func(fs []Finding) []string {
