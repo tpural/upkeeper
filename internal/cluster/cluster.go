@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"slices"
 	"sort"
@@ -679,6 +680,9 @@ func (c *Cluster) Hopeless(ctx context.Context, ns, kind, name string) (string, 
 	var why []string
 	for i := range pods {
 		w := hopeless(&pods[i])
+		if w == "" {
+			w = c.crashedOn(ctx, &pods[i])
+		}
 		if w == "" && !ready(&pods[i]) {
 			return "", nil // a pod that's failing for a reason a fresh one may not have
 		}
@@ -714,6 +718,27 @@ func hopeless(p *corev1.Pod) string {
 	return ""
 }
 
+// crashedOn says why a crashing container can't be fixed by a new pod, from
+// the last lines it wrote before it died.
+func (c *Cluster) crashedOn(ctx context.Context, p *corev1.Pod) string {
+	for _, s := range p.Status.ContainerStatuses {
+		if s.RestartCount == 0 {
+			continue
+		}
+		lines := int64(10)
+		rc, err := c.K.CoreV1().Pods(p.Namespace).GetLogs(p.Name, &corev1.PodLogOptions{Container: s.Name, Previous: true, TailLines: &lines}).Stream(ctx)
+		if err != nil {
+			continue
+		}
+		b, _ := io.ReadAll(io.LimitReader(rc, 64<<10))
+		_ = rc.Close()
+		if strings.Contains(string(b), "exec format error") {
+			return s.Name + "'s image is built for another CPU architecture (exec format error)"
+		}
+	}
+	return ""
+}
+
 func ready(p *corev1.Pod) bool {
 	for _, cd := range p.Status.Conditions {
 		if cd.Type == corev1.PodReady {
@@ -721,4 +746,54 @@ func ready(p *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// Settle waits up to timeout for a deployment, statefulset or daemonset to
+// have every replica updated and ready, and says how it went.
+func (c *Cluster) Settle(ctx context.Context, ns, kind, name string, timeout time.Duration) string {
+	start := c.Now()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var want, ready, updated int32
+	for {
+		switch kind {
+		case "deployment":
+			if d, err := c.K.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{}); err == nil {
+				want, ready, updated = ptr(d.Spec.Replicas, 1), d.Status.ReadyReplicas, d.Status.UpdatedReplicas
+			}
+		case "statefulset":
+			if s, err := c.K.AppsV1().StatefulSets(ns).Get(ctx, name, metav1.GetOptions{}); err == nil {
+				want, ready, updated = ptr(s.Spec.Replicas, 1), s.Status.ReadyReplicas, s.Status.UpdatedReplicas
+			}
+		case "daemonset":
+			if d, err := c.K.AppsV1().DaemonSets(ns).Get(ctx, name, metav1.GetOptions{}); err == nil {
+				want, ready, updated = d.Status.DesiredNumberScheduled, d.Status.NumberReady, d.Status.UpdatedNumberScheduled
+			}
+		default:
+			return ""
+		}
+		if want > 0 && ready >= want && updated >= want {
+			return fmt.Sprintf("%s %s/%s has %d/%d ready after %s.", kind, ns, name, ready, want, c.Now().Sub(start).Round(time.Second))
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Sprintf("%s %s/%s has %d/%d ready after %s: not settled yet; look at its pods.", kind, ns, name, ready, want, timeout)
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
+// Owner is a pod's workload, as kind and name, when it's a deployment,
+// statefulset or daemonset.
+func (c *Cluster) Owner(ctx context.Context, ns, pod string) (string, string) {
+	p, err := c.K.CoreV1().Pods(ns).Get(ctx, pod, metav1.GetOptions{})
+	if err != nil {
+		return "", ""
+	}
+	kind, name, _ := strings.Cut(Workload(p), "/")
+	switch kind {
+	case "deployment", "statefulset", "daemonset":
+		return kind, name
+	}
+	return "", ""
 }

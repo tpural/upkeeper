@@ -296,6 +296,7 @@ func TestPatrol(t *testing.T) {
 // TestActions checks that each change is asked of tremolo first, and that a
 // refusal stops it.
 func TestActions(t *testing.T) {
+	settleFor = 50 * time.Millisecond
 	var mu sync.Mutex
 	var asked []string
 	refuse := false

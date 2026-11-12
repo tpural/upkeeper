@@ -33,6 +33,9 @@ type Tool struct {
 	Run func(ctx context.Context, args map[string]any) (string, error)
 	// Ends reports that a successful call ends the run, e.g. finish or escalate.
 	Ends bool
+	// Changes reports that a successful call changes the cluster, so earlier
+	// answers may be out of date and repeating a call is fine.
+	Changes bool
 }
 
 // Fatal wraps an error that should stop the run, not go back to the model.
@@ -171,6 +174,11 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			if seen[key(call)] >= 3 {
 				res.Stopped = "kept repeating " + name
 				return res, nil
+			}
+			if tl, ok := byName[name]; ok && tl.Changes && strings.HasPrefix(answer, "Done.") {
+				clear(seen)
+				clear(nothing)
+				empty = 0
 			}
 			if found(answer) {
 				empty = 0

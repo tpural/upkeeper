@@ -149,3 +149,21 @@ func TestHopeless(t *testing.T) {
 		t.Errorf("a wedged pod is hopeless: %q", why)
 	}
 }
+
+func TestSettle(t *testing.T) {
+	two := int32(2)
+	c := &Cluster{K: fake.NewClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "a"}, Spec: appsv1.DeploymentSpec{Replicas: &two},
+		Status: appsv1.DeploymentStatus{ReadyReplicas: 2, UpdatedReplicas: 2},
+	}), Now: time.Now}
+	if got := c.Settle(context.Background(), "a", "deployment", "api", time.Second); !strings.HasPrefix(got, "deployment a/api has 2/2 ready after") {
+		t.Errorf("settle = %q", got)
+	}
+	c.K = fake.NewClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "a"}, Spec: appsv1.DeploymentSpec{Replicas: &two},
+		Status: appsv1.DeploymentStatus{ReadyReplicas: 1, UpdatedReplicas: 2},
+	})
+	if got := c.Settle(context.Background(), "a", "deployment", "api", 100*time.Millisecond); !strings.Contains(got, "1/2 ready") || !strings.Contains(got, "not settled yet") {
+		t.Errorf("unsettled = %q", got)
+	}
+}

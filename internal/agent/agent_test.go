@@ -236,3 +236,16 @@ func TestUnreachable(t *testing.T) {
 		t.Errorf("result %+v", res)
 	}
 }
+
+// TestChangeForgets checks that after a change, the same look is allowed again.
+func TestChangeForgets(t *testing.T) {
+	look := call("pods", `{"namespace":"a"}`)
+	var calls []string
+	fix := Tool{Name: "delete_pod", Changes: true, Params: json.RawMessage(`{}`), Run: func(context.Context, map[string]any) (string, error) { return "Done. 2/2 ready.", nil }}
+	m := &script{replies: []llm.Message{look, call("delete_pod", `{}`), look, call("finish", `{"fix":"deleted the wedged pod"}`)}}
+	a := &Agent{Model: m, Log: slog.New(slog.DiscardHandler)}
+	res, _ := a.Run(context.Background(), Task{Tools: append(tools(&calls), fix), MaxSteps: 10})
+	if res.Ended != "finish" || len(calls) != 2 || res.Checkpoint != nil {
+		t.Errorf("result %+v, pods ran %d times", res, len(calls))
+	}
+}
