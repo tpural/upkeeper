@@ -355,6 +355,12 @@ func TestActions(t *testing.T) {
 		t.Error("scaled to 0")
 	}
 
+	// Not to what it already has: that's no restart.
+	if _, err := scale.Run(context.Background(), map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie", "replicas": 1.0, "why": "restart it"}); err == nil ||
+		!strings.Contains(err.Error(), "already wants 1") {
+		t.Errorf("scaled to the same: %v", err)
+	}
+
 	// No why, no action.
 	if _, err := restart.Run(context.Background(), map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie"}); err == nil {
 		t.Error("restarted without a why")

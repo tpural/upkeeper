@@ -797,3 +797,22 @@ func (c *Cluster) Owner(ctx context.Context, ns, pod string) (string, string) {
 	}
 	return "", ""
 }
+
+// Replicas is how many replicas a deployment or statefulset wants.
+func (c *Cluster) Replicas(ctx context.Context, ns, kind, name string) (int32, error) {
+	switch kind {
+	case "deployment":
+		d, err := c.K.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return 0, err
+		}
+		return ptr(d.Spec.Replicas, 1), nil
+	case "statefulset":
+		s, err := c.K.AppsV1().StatefulSets(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return 0, err
+		}
+		return ptr(s.Spec.Replicas, 1), nil
+	}
+	return 0, errors.New("kind must be deployment or statefulset")
+}
