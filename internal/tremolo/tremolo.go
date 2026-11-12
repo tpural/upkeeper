@@ -305,3 +305,38 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 	r.Header.Set("Authorization", "Bearer "+b.token)
 	return b.next.RoundTrip(r)
 }
+
+// Runbook is a runbook in tremolo.
+type Runbook struct {
+	ID      string   `json:"id"`
+	Title   string   `json:"title"`
+	Body    string   `json:"body"`
+	Rules   []string `json:"rules"`
+	Version int      `json:"version"`
+}
+
+// Runbooks returns the runbooks covering rule.
+func (c *Client) Runbooks(ctx context.Context, rule string) ([]Runbook, error) {
+	var out []Runbook
+	err := c.do(ctx, http.MethodGet, "/api/runbooks", url.Values{"rule": {rule}}, nil, &out)
+	return out, err
+}
+
+// Runbook returns one runbook.
+func (c *Client) Runbook(ctx context.Context, id string) (Runbook, error) {
+	var out Runbook
+	err := c.do(ctx, http.MethodGet, "/api/runbooks/"+url.PathEscape(id), nil, nil, &out)
+	return out, err
+}
+
+// SaveRunbook updates rb, which must carry the version it was read at, or
+// creates it when its version is 0.
+func (c *Client) SaveRunbook(ctx context.Context, rb Runbook) (Runbook, error) {
+	var out Runbook
+	if rb.Version == 0 {
+		err := c.do(ctx, http.MethodPost, "/api/runbooks", nil, rb, &out)
+		return out, err
+	}
+	err := c.do(ctx, http.MethodPut, "/api/runbooks/"+url.PathEscape(rb.ID), nil, rb, &out)
+	return out, err
+}

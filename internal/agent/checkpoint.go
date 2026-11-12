@@ -51,6 +51,10 @@ var Choices = []Choice{
 	{"escalate", "the fix needs something you can't do (config, code, a secret, hardware), or you're out of ideas", false},
 }
 
+// SearchChoice is offered when the run may search the web.
+var SearchChoice = Choice{"search", `an error you don't understand would be explained by documentation: put a short web query in "query", ` +
+	`made of the error message and public product names only (no hostnames, IPs, pod or namespace names)`, true}
+
 // JSONChatter is a model that can be made to answer with JSON.
 type JSONChatter interface {
 	ChatJSON(ctx context.Context, msgs []llm.Message, schema json.RawMessage) (llm.Message, llm.Usage, error)
@@ -67,6 +71,11 @@ func checkpointPrompt(choices []Choice, why string) string {
 		fmt.Fprintf(&b, "    %q: %s;\n", c.Name, c.Meaning)
 	}
 	b.WriteString(`- "look_at": for a choice that continues, exactly what to do next.` + "\n")
+	for _, c := range choices {
+		if c.Name == SearchChoice.Name {
+			b.WriteString(`- "query": for search, the web query.` + "\n")
+		}
+	}
 	b.WriteString("Don't repeat a check you've already made. Decide.")
 	return b.String()
 }
@@ -150,7 +159,10 @@ func parseCheckpoint(s string, choices []Choice, c *Checkpoint) error {
 	c.Next = strings.ToLower(strings.TrimSpace(c.Next))
 	for _, ch := range choices {
 		if ch.Name == c.Next {
-			if ch.Continue && strings.TrimSpace(c.LookAt) == "" {
+			switch {
+			case ch.Name == SearchChoice.Name && strings.TrimSpace(c.Query) == "":
+				return fmt.Errorf("next search without a query")
+			case ch.Continue && ch.Name != SearchChoice.Name && strings.TrimSpace(c.LookAt) == "":
 				return fmt.Errorf("next %q without look_at", c.Next)
 			}
 			return nil

@@ -21,6 +21,7 @@ import (
 	"github.com/tpural/upkeeper/internal/config"
 	"github.com/tpural/upkeeper/internal/patrol"
 	"github.com/tpural/upkeeper/internal/tremolo"
+	"github.com/tpural/upkeeper/internal/web"
 )
 
 // Tremolo is the part of tremolo's API the runner uses.
@@ -34,6 +35,9 @@ type Tremolo interface {
 	Close(ctx context.Context, id int64, status, summary, fix, runbook string) error
 	Escalate(ctx context.Context, id int64, why string) error
 	Past(ctx context.Context, rule string, limit int) ([]tremolo.Investigation, error)
+	Runbooks(ctx context.Context, rule string) ([]tremolo.Runbook, error)
+	Runbook(ctx context.Context, id string) (tremolo.Runbook, error)
+	SaveRunbook(ctx context.Context, rb tremolo.Runbook) (tremolo.Runbook, error)
 }
 
 // Toolbox gives the model its tools for an investigation, or for a patrol when
@@ -54,6 +58,12 @@ type Runner struct {
 	Now     func() time.Time
 	Metrics *Metrics
 	Tracer  trace.Tracer
+	// Web searches and reads pages; nil means no web.
+	Web *web.Client
+	// Nodes lists the cluster's node names, which a query mustn't carry.
+	Nodes func(ctx context.Context) ([]string, error)
+
+	checks sourceChecks
 
 	mu         sync.Mutex
 	status     Status
@@ -292,8 +302,14 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 	run, cancel := context.WithTimeout(ctx, r.Config.Model.Timeout.Duration)
 	defer cancel()
 	var findings []string
+	var refs []ref
+	var search func(context.Context, agent.Checkpoint) (string, error)
+	if r.Web != nil {
+		search = func(ctx context.Context, c agent.Checkpoint) (string, error) { return r.webSearch(ctx, full, c, &refs) }
+	}
 	res, err := r.Agent.Run(run, agent.Task{
-		System: cmp(r.Config.Prompt, System), User: brief(run, full, tools, r.past(ctx, full)), Tools: tools, MaxSteps: r.Config.Model.MaxSteps,
+		System: cmp(r.Config.Prompt, System), User: brief(run, full, tools, r.past(ctx, full)) + r.reviewSources(ctx, full),
+		Tools: tools, MaxSteps: r.Config.Model.MaxSteps, Search: search,
 		OnCall: func(name string, args map[string]any, answer string) {
 			if name == "record" {
 				findings = append(findings, str(args, "text"))
@@ -310,7 +326,7 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 	if ctx.Err() != nil {
 		return // shutting down; the claim expires and someone else takes it
 	}
-	outcome = r.finish(ctx, full, res, findings, err)
+	outcome = r.finish(ctx, full, res, findings, refs, err)
 	span.SetAttributes(attribute.Int("upkeeper.steps", res.Steps), attribute.Int("gen_ai.usage.total_tokens", res.Tokens))
 	if res.Stopped != "" {
 		decided(span, "stopped the model", res.Stopped)
@@ -321,14 +337,18 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 }
 
 // finish closes or escalates the investigation from how the run ended.
-func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agent.Result, findings []string, err error) string {
+func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agent.Result, findings []string, refs []ref, err error) string {
 	switch {
 	case err != nil:
 		r.escalate(ctx, inv.ID, "upkeeper couldn't work this: "+err.Error())
 		return "error"
 	case res.Ended == "finish":
-		var f struct{ Status, Summary, Fix, Runbook string }
+		var f struct {
+			Status, Summary, Fix, Runbook string
+			Sources                       []int
+		}
 		_ = json.Unmarshal([]byte(res.Answer), &f)
+		defer r.keepSources(ctx, inv, f.Sources, refs, f.Runbook, "fixed", f.Fix)
 		if err := r.T.Close(ctx, inv.ID, f.Status, f.Summary, f.Fix, f.Runbook); err != nil && f.Runbook != "" {
 			err = r.T.Close(ctx, inv.ID, f.Status, f.Summary, f.Fix, "") // most likely a runbook it made up
 			if err != nil {
@@ -339,11 +359,23 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 		}
 		return f.Status
 	case res.Ended == "escalate":
-		r.escalate(ctx, inv.ID, res.Answer)
+		var e struct {
+			Why     string
+			Sources []int
+		}
+		if json.Unmarshal([]byte(res.Answer), &e) != nil {
+			e.Why = res.Answer
+		}
+		why := e.Why
+		if len(e.Sources) > 0 {
+			why += " Sources: " + citedURLs(e.Sources, refs)
+		}
+		r.escalate(ctx, inv.ID, why)
+		r.keepSources(ctx, inv, e.Sources, refs, "", "escalated", e.Why)
 		return "escalated"
 	case res.Decided != "" && res.Checkpoint != nil:
 		// It stepped back and decided a person should take this.
-		r.escalate(ctx, inv.ID, "upkeeper stepped back and decided to hand this over. "+res.Checkpoint.Summary())
+		r.escalate(ctx, inv.ID, strings.Join(append([]string{"upkeeper stepped back and decided to hand this over. " + res.Checkpoint.Summary()}, res.Notes...), " "))
 		return "escalated"
 	}
 	why := "upkeeper stopped without deciding (" + res.Stopped + ")."
@@ -383,6 +415,16 @@ func (r *Runner) fail(what string, err error) {
 }
 
 // brief is the first message: the investigation, and what's known already.
+func citedURLs(cited []int, refs []ref) string {
+	var out []string
+	for _, n := range cited {
+		if n >= 1 && n <= len(refs) {
+			out = append(out, refs[n-1].URL)
+		}
+	}
+	return strings.Join(out, " ")
+}
+
 // past is how the latest investigations of the same rule ended.
 func (r *Runner) past(ctx context.Context, inv tremolo.Investigation) []tremolo.Investigation {
 	if inv.Rule == "" {

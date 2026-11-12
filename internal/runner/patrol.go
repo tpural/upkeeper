@@ -38,8 +38,8 @@ func (r *Runner) check(ctx context.Context) {
 // openFinding opens f unless the same title is open, escalated, or was
 // closed in the last week.
 func (r *Runner) openFinding(ctx context.Context, f patrol.Finding) (bool, error) {
-	if f.Kind != "gap" && f.Kind != "tuning" {
-		return false, errors.New("kind must be gap or tuning")
+	if f.Kind != "gap" && f.Kind != "tuning" && f.Kind != "runbook-review" {
+		return false, errors.New("kind must be gap, tuning or runbook-review")
 	}
 	list, err := r.T.List(ctx, 300)
 	if err != nil {
@@ -146,4 +146,8 @@ func (r *Runner) patrolAfter(t time.Time) time.Time {
 		next = next.AddDate(0, 0, 1)
 	}
 	return next
+}
+
+func findingOf(kind, title, text string) patrol.Finding {
+	return patrol.Finding{Kind: kind, Title: title, Text: text}
 }

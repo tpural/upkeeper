@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +32,7 @@ type fakeTremolo struct {
 	invs   []tremolo.Investigation
 	did    []string
 	paused bool
+	books  []tremolo.Runbook
 }
 
 func (f *fakeTremolo) log(s string, a ...any) {
@@ -47,6 +49,39 @@ func (f *fakeTremolo) Past(_ context.Context, rule string, _ int) ([]tremolo.Inv
 		}
 	}
 	return out, nil
+}
+
+func (f *fakeTremolo) Runbooks(_ context.Context, rule string) ([]tremolo.Runbook, error) {
+	var out []tremolo.Runbook
+	for _, rb := range f.books {
+		if slices.Contains(rb.Rules, rule) {
+			out = append(out, rb)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeTremolo) Runbook(_ context.Context, id string) (tremolo.Runbook, error) {
+	for _, rb := range f.books {
+		if rb.ID == id {
+			return rb, nil
+		}
+	}
+	return tremolo.Runbook{}, &tremolo.Error{Code: 404, Msg: "no such runbook"}
+}
+
+func (f *fakeTremolo) SaveRunbook(_ context.Context, rb tremolo.Runbook) (tremolo.Runbook, error) {
+	f.log("save runbook %s v%d", rb.ID, rb.Version)
+	for i := range f.books {
+		if f.books[i].ID == rb.ID {
+			rb.Version++
+			f.books[i] = rb
+			return rb, nil
+		}
+	}
+	rb.Version = 1
+	f.books = append(f.books, rb)
+	return rb, nil
 }
 
 func (f *fakeTremolo) Paused(context.Context) (bool, string, error) { return f.paused, "tp", nil }

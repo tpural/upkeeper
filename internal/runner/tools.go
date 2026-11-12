@@ -57,6 +57,7 @@ const (
 	pNamespace = `"namespace":{"type":"string","description":"the Kubernetes namespace"}`
 	pKind      = `"kind":{"type":"string","enum":["deployment","statefulset","daemonset"]}`
 	pName      = `"name":{"type":"string","description":"the workload's name, without kind/"}`
+	pSources   = `"sources":{"type":"array","items":{"type":"integer"},"description":"the numbers of the web references that had the answer, if you were given any"}`
 	pWhy       = //nolint:gosec // a schema, not a credential
 	`"why":{"type":"string","description":"what you expect this to fix, from what you found"}`
 )
@@ -192,7 +193,7 @@ func ending() []agent.Tool {
 		{
 			Name: "finish", Ends: true,
 			Description: "End the task. status fixed: you fixed it and checked it worked; say the fix in one line. status abandoned: nothing to do (it fixed itself, or isn't worth doing); say why in summary.",
-			Params:      schema(`"status":{"type":"string","enum":["fixed","abandoned"]},"summary":{"type":"string","description":"what was wrong and what you did, in two or three sentences"},"fix":{"type":"string","description":"for fixed: the fix in one line, e.g. 'Restarted gridtie after its upstream DNS changed'"},"runbook":{"type":"string","description":"the runbook id you used, if any"}`, "status", "summary"),
+			Params:      schema(`"status":{"type":"string","enum":["fixed","abandoned"]},"summary":{"type":"string","description":"what was wrong and what you did, in two or three sentences"},"fix":{"type":"string","description":"for fixed: the fix in one line, e.g. 'Restarted gridtie after its upstream DNS changed'"},"runbook":{"type":"string","description":"the runbook id you used, if any"},`+pSources, "status", "summary"),
 			Run: func(_ context.Context, a map[string]any) (string, error) {
 				if str(a, "status") == "fixed" && strings.TrimSpace(str(a, "fix")) == "" {
 					return "", errors.New("for status fixed, say the fix in one line")
@@ -204,12 +205,13 @@ func ending() []agent.Tool {
 		{
 			Name: "escalate", Ends: true,
 			Description: "Hand this to a person: you can't fix it, it needs something you can't do, or fixing it is risky. Say what you found and what you tried.",
-			Params:      schema(`"why":{"type":"string","description":"what's wrong, what you tried, and what a person should do next"}`, "why"),
+			Params:      schema(`"why":{"type":"string","description":"what's wrong, what you tried, and what a person should do next"},`+pSources, "why"),
 			Run: func(_ context.Context, a map[string]any) (string, error) {
 				if strings.TrimSpace(str(a, "why")) == "" {
 					return "", errors.New("say what you found and tried")
 				}
-				return str(a, "why"), nil
+				b, _ := json.Marshal(map[string]any{"why": str(a, "why"), "sources": a["sources"]})
+				return string(b), nil
 			},
 		},
 	}

@@ -19,6 +19,9 @@ type Config struct {
 	Model   Model   `json:"model"`
 	GPU     GPU     `json:"gpu"`
 	Patrol  Patrol  `json:"patrol"`
+	// Web lets a stuck model search the web at a checkpoint; without
+	// web.searxng it can't.
+	Web Web `json:"web,omitzero"`
 	// Traces is where upkeeper sends a trace of each run; empty sends none.
 	Traces Traces `json:"traces,omitzero"`
 	// Prompt replaces the built-in system prompt for investigations.
@@ -60,6 +63,16 @@ type Patrol struct {
 	Timezone string `json:"timezone,omitempty"`
 	// Prompt is what the model is asked to do on patrol.
 	Prompt string `json:"prompt,omitempty"`
+}
+
+// Web is search through a SearXNG.
+type Web struct {
+	SearXNG string `json:"searxng,omitempty"`
+	// Allow are the domains whose pages are read from search results.
+	Allow []string `json:"allow,omitempty"`
+	// Private are words never sent in a query: hostnames, domains, project
+	// names. Node names are added on their own.
+	Private []string `json:"private,omitempty"`
 }
 
 // Traces is an OTLP/HTTP endpoint, e.g. tremolo's ingest. The token comes from $TRACES_TOKEN.
