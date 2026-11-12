@@ -60,7 +60,12 @@ func (c *Cluster) Pods(ctx context.Context, ns string) (string, error) {
 		p := &list.Items[i]
 		ready, total, restarts, why := containers(p, c.Now())
 		bad := p.Status.Phase != corev1.PodRunning && p.Status.Phase != corev1.PodSucceeded || ready < total
-		t := fmt.Sprintf("%s %s ready %d/%d restarts %d age %s node %s", p.Name, p.Status.Phase, ready, total, restarts, age(c.Now(), p.CreationTimestamp.Time), p.Spec.NodeName)
+		count := fmt.Sprint(restarts)
+		if last := lastRestart(p); !last.IsZero() {
+			// A count is over the pod's life; whether it's still happening is when.
+			count += " (last " + age(c.Now(), last) + " ago)"
+		}
+		t := fmt.Sprintf("%s %s ready %d/%d restarts %s age %s node %s", p.Name, p.Status.Phase, ready, total, count, age(c.Now(), p.CreationTimestamp.Time), p.Spec.NodeName)
 		if why != "" {
 			t += " — " + why
 		}
@@ -337,6 +342,17 @@ func Workload(p *corev1.Pod) string {
 	return "pod/" + p.Name
 }
 
+// lastRestart is when a container of p last stopped, or zero.
+func lastRestart(p *corev1.Pod) time.Time {
+	var last time.Time
+	for _, s := range p.Status.ContainerStatuses {
+		if t := s.LastTerminationState.Terminated; t != nil && s.RestartCount > 0 && t.FinishedAt.After(last) {
+			last = t.FinishedAt.Time
+		}
+	}
+	return last
+}
+
 func containers(p *corev1.Pod, now time.Time) (ready, total int, restarts int32, why string) {
 	for _, s := range p.Status.ContainerStatuses {
 		total++
@@ -426,6 +442,40 @@ var reSecretName = regexp.MustCompile(`(?i)pass|secret|token|key|cred|auth|priva
 // containers (image, command, env names and where each comes from, resources),
 // scheduling (nodeSelector, affinity, tolerations) and volumes. Secret values
 // are never read; a literal value with a secret-like name is hidden.
+// notes are a workload's annotations that people wrote, not the ones tools
+// keep: they often say why it's set up the way it is.
+func notes(ann map[string]string) string {
+	var out []string
+	for k, v := range ann {
+		domain, _, ok := strings.Cut(k, "/")
+		if ok && slices.ContainsFunc([]string{"kubernetes.io", "k8s.io", "fluxcd.io", "helm.sh"}, func(d string) bool {
+			return domain == d || strings.HasSuffix(domain, "."+d)
+		}) {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s=%q", k, clip(v, 200)))
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	slices.Sort(out)
+	return "annotations: " + strings.Join(out, " ") + "\n"
+}
+
+// autoscaled says whether an HPA sets the workload's replicas.
+func (c *Cluster) autoscaled(ctx context.Context, ns, kind, name string) string {
+	hpas, err := c.K.AutoscalingV2().HorizontalPodAutoscalers(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return ""
+	}
+	for _, h := range hpas.Items {
+		if r := h.Spec.ScaleTargetRef; r.Kind == kind && r.Name == name {
+			return fmt.Sprintf("autoscaled by HPA %s: %d to %d replicas, now wants %d\n", h.Name, ptr(h.Spec.MinReplicas, 1), h.Spec.MaxReplicas, h.Status.DesiredReplicas)
+		}
+	}
+	return "no HPA scales it\n"
+}
+
 func (c *Cluster) Spec(ctx context.Context, ns, kind, name string) (string, error) {
 	var spec corev1.PodSpec
 	var b strings.Builder
@@ -437,6 +487,8 @@ func (c *Cluster) Spec(ctx context.Context, ns, kind, name string) (string, erro
 		}
 		spec = d.Spec.Template.Spec
 		fmt.Fprintf(&b, "deployment %s/%s, replicas %d\n", ns, name, ptr(d.Spec.Replicas, 1))
+		b.WriteString(notes(d.Annotations))
+		b.WriteString(c.autoscaled(ctx, ns, "Deployment", name))
 	case "statefulset":
 		s, err := c.K.AppsV1().StatefulSets(ns).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
@@ -444,6 +496,8 @@ func (c *Cluster) Spec(ctx context.Context, ns, kind, name string) (string, erro
 		}
 		spec = s.Spec.Template.Spec
 		fmt.Fprintf(&b, "statefulset %s/%s, replicas %d\n", ns, name, ptr(s.Spec.Replicas, 1))
+		b.WriteString(notes(s.Annotations))
+		b.WriteString(c.autoscaled(ctx, ns, "StatefulSet", name))
 	case "daemonset":
 		d, err := c.K.AppsV1().DaemonSets(ns).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
@@ -451,6 +505,7 @@ func (c *Cluster) Spec(ctx context.Context, ns, kind, name string) (string, erro
 		}
 		spec = d.Spec.Template.Spec
 		fmt.Fprintf(&b, "daemonset %s/%s\n", ns, name)
+		b.WriteString(notes(d.Annotations))
 	case "pod":
 		p, err := c.K.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
