@@ -44,6 +44,10 @@ func TestCheck(t *testing.T) {
 			LastTimestamp: metav1.NewTime(now.Add(-time.Minute)), InvolvedObject: corev1.ObjectReference{Kind: "Pod", Namespace: "gridtie", Name: "gridtie-7d9f8-a"},
 		},
 		&corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{Name: "e3", Namespace: "gridtie"}, Type: "Warning", Reason: "BackOff", Count: 40, Message: "Back-off restarting",
+			LastTimestamp: metav1.NewTime(now.Add(-time.Minute)), InvolvedObject: corev1.ObjectReference{Kind: "Pod", Namespace: "gridtie", Name: "deleted-7d9f8-b"},
+		},
+		&corev1.Event{
 			ObjectMeta: metav1.ObjectMeta{Name: "e2", Namespace: "gridtie"}, Type: "Warning", Reason: "Unhealthy", Count: 50,
 			LastTimestamp: metav1.NewTime(now.Add(-3 * time.Hour)), InvolvedObject: corev1.ObjectReference{Kind: "Pod", Namespace: "gridtie", Name: "old-1-x"},
 		},

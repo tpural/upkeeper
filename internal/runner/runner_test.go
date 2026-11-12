@@ -137,6 +137,7 @@ func newRunner(t *testing.T, f *fakeTremolo, model *replies, awake *bool) (*Runn
 		Toolbox: func(_ context.Context, inv *tremolo.Investigation) ([]agent.Tool, func(), error) {
 			tools := []agent.Tool{{Name: "pods", Params: schema(""), Run: func(context.Context, map[string]any) (string, error) { return "all good", nil }}}
 			if inv != nil {
+				tools = append(tools, agent.Tool{Name: "record", Params: schema(""), Run: func(context.Context, map[string]any) (string, error) { return "Recorded.", nil }})
 				tools = append(tools, ending()...)
 			}
 			return tools, func() {}, nil
@@ -179,11 +180,11 @@ func TestIncidents(t *testing.T) {
 		t.Errorf("did %q", got)
 	}
 
-	// Awake, the gap is worked; a model that gets stuck is escalated with its last steps.
+	// Awake, the gap is worked; a model that gets stuck on it is closed, not escalated: nothing is firing.
 	awake = true
 	*model = replies{call("pods", `{}`), call("pods", `{}`), call("pods", `{}`)}
 	r.Tick(ctx)
-	if got := f.took(); !strings.Contains(got, "escalate 1 upkeeper stopped without deciding (kept repeating pods). It found nothing it recorded; its last steps: pods: all good") {
+	if got := f.took(); !strings.Contains(got, "close 1 abandoned ") {
 		t.Errorf("did %q", got)
 	}
 
@@ -194,9 +195,17 @@ func TestIncidents(t *testing.T) {
 		t.Errorf("did %q", got)
 	}
 
+	// A stuck incident is escalated, leading with what was found.
+	f.invs = append(f.invs, tremolo.Investigation{ID: 6, Kind: "incident", Title: "orders down", Status: "open", Opened: now.Add(-time.Hour)})
+	*model = replies{call("record", `{"text":"orders exits: DATABASE_URL is not set."}`), call("pods", `{}`), call("pods", `{}`), call("pods", `{}`)}
+	r.Tick(ctx)
+	if got := f.took(); !strings.Contains(got, "escalate 6 upkeeper stopped without deciding (kept repeating pods). What it found: orders exits: DATABASE_URL is not set.") {
+		t.Errorf("did %q", got)
+	}
+
 	// Paused: nothing happens.
 	f.paused = true
-	f.invs = append(f.invs, tremolo.Investigation{ID: 5, Kind: "incident", Title: "x", Status: "open", Opened: *now})
+	f.invs = append(f.invs, tremolo.Investigation{ID: 7, Kind: "incident", Title: "x", Status: "open", Opened: *now})
 	r.Tick(ctx)
 	if got := f.took(); got != "" || r.Status().Paused != "paused by tp" {
 		t.Errorf("paused but did %q (%+v)", got, r.Status())

@@ -141,7 +141,7 @@ func TestNudges(t *testing.T) {
 	a.Model = m
 	full := Tool{Name: "logs", Params: json.RawMessage(`{}`), Run: func(context.Context, map[string]any) (string, error) { return "3 lines", nil }}
 	_, _ = a.Run(context.Background(), Task{Tools: []Tool{full}, MaxSteps: 5})
-	if got := m.seen[3][len(m.seen[3])-1].Content; got != "You've used 3 of your 5 steps. Wrap up now: finish, or escalate with what you found." {
+	if got := m.seen[3][len(m.seen[3])-1].Content; got != "You've used 3 of your 5 steps. Wrap up now with what you found, and call the tool that ends the task." {
 		t.Errorf("4th step was told %q", got)
 	}
 }
@@ -173,7 +173,7 @@ func TestSpans(t *testing.T) {
 		"chat qwen gen_ai.usage.input_tokens":          "10",
 		"chat qwen gen_ai.response.finish_reasons":     `["tool_calls"]`,
 		"execute_tool pods gen_ai.tool.call.arguments": `{"namespace":"a"}`,
-		"execute_tool pods upkeeper.found":             "true",
+		"execute_tool pods tremolo.tool.found":         "true",
 	} {
 		if attrs[k] != want {
 			t.Errorf("%s = %q, want %q", k, attrs[k], want)

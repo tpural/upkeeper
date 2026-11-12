@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -57,7 +58,7 @@ func (r *Runner) openFinding(ctx context.Context, f patrol.Finding) (bool, error
 // patrol has the model look around with read-only tools.
 func (r *Runner) patrol(ctx context.Context) {
 	r.lastPatrol = r.Now()
-	ctx, span := r.start(ctx, "patrol", attribute.String("upkeeper.task", "patrol"))
+	ctx, span := r.start(ctx, "patrol", attribute.String("tremolo.task", "patrol"))
 	defer span.End()
 	tools, done, err := r.Toolbox(ctx, nil)
 	if err != nil {
@@ -98,16 +99,22 @@ func (r *Runner) patrol(ctx context.Context) {
 	res, err := r.Agent.Run(run, agent.Task{
 		System: PatrolSystem, User: cmp(r.Config.Patrol.Prompt, DefaultPatrol), Tools: tools, MaxSteps: r.Config.Model.MaxSteps,
 	})
-	said := res.Answer
+	said, outcome := res.Answer, "all clear"
 	switch {
 	case err != nil:
 		r.fail("patrol", err)
-		said = "failed: " + err.Error()
+		said, outcome = "failed: "+err.Error(), "error"
+	case res.Ended == "" && strings.HasPrefix(res.Stopped, "searched"):
+		// On patrol, searching and finding nothing is the good answer.
+		said = "All clear: " + res.Stopped + "."
 	case res.Ended == "":
-		said = "stopped: " + res.Stopped
+		said, outcome = "stopped: "+res.Stopped, "stopped"
+	}
+	if opened > 0 {
+		outcome = "opened"
 	}
 	span.SetAttributes(attribute.Int("upkeeper.steps", res.Steps), attribute.Int("gen_ai.usage.total_tokens", res.Tokens),
-		attribute.Int("upkeeper.opened", opened), attribute.String("upkeeper.outcome", clip(said, 1000)))
+		attribute.Int("upkeeper.opened", opened), attribute.String("tremolo.outcome", outcome), attribute.String("tremolo.summary", clip(said, 1000)))
 	r.Log.Info("patrol done", "opened", opened, "steps", res.Steps, "said", clip(said, 500))
 	r.Metrics.Patrols.Inc()
 	r.set(func(s *Status) { s.LastPatrol, s.PatrolSaid = r.Now(), clip(said, 1000) })
