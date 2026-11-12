@@ -47,7 +47,7 @@ type GPU struct {
 	Deployment string `json:"deployment,omitempty"`
 	// WakeDelay is how long an alert must stay firing before upkeeper wakes the GPU for it.
 	WakeDelay Duration `json:"wakeDelay,omitempty"`
-	// MaxWakesPerDay caps wakes; past it, alerts are escalated instead.
+	// MaxWakesPerDay caps wakes; past it, alerts are escalated instead. 0, the default, is no limit.
 	MaxWakesPerDay int `json:"maxWakesPerDay,omitempty"`
 }
 
@@ -114,9 +114,6 @@ func Parse(b []byte) (Config, error) {
 	}
 	if c.Model.MaxSteps == 0 {
 		c.Model.MaxSteps = 30
-	}
-	if c.GPU.MaxWakesPerDay == 0 {
-		c.GPU.MaxWakesPerDay = 6
 	}
 	if c.Patrol.Timezone == "" {
 		c.Patrol.Timezone = "Local"

@@ -12,7 +12,7 @@ func TestParse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Tremolo.Token != "tok" || c.Name != "upkeeper" || c.Every.Duration != 30*time.Second || c.GPU.WakeDelay.Duration != 3*time.Minute || c.GPU.MaxWakesPerDay != 6 || c.Model.MaxSteps != 30 {
+	if c.Tremolo.Token != "tok" || c.Name != "upkeeper" || c.Every.Duration != 30*time.Second || c.GPU.WakeDelay.Duration != 3*time.Minute || c.GPU.MaxWakesPerDay != 0 || c.Model.MaxSteps != 30 {
 		t.Errorf("defaults: %+v", c)
 	}
 	_, err = Parse([]byte("model: {url: x}\ngpu: {deployment: nope}\npatrol: {at: '7pm'}\n"))

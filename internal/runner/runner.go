@@ -192,8 +192,8 @@ func (r *Runner) awake(ctx context.Context) bool {
 }
 
 // next picks the investigation to work: incidents first, oldest first, once
-// they've fired for the wake delay (unless the GPU is up anyway); other kinds
-// only while the GPU is up.
+// they've fired for the wake delay (unless the GPU is up anyway), so an alert
+// that clears by itself doesn't wake it; then everything else.
 func (r *Runner) next(ctx context.Context, awake bool) (*tremolo.Investigation, error) {
 	list, err := r.T.List(ctx, 100, "open")
 	if err != nil {
@@ -213,7 +213,7 @@ func (r *Runner) next(ctx context.Context, awake bool) (*tremolo.Investigation, 
 		switch {
 		case i.Kind == "incident" && (awake || now.Sub(i.Opened) >= r.Config.GPU.WakeDelay.Duration):
 			return &i, nil
-		case i.Kind != "incident" && awake:
+		case i.Kind != "incident":
 			return &i, nil
 		}
 	}
@@ -228,7 +228,7 @@ func (r *Runner) wake() bool {
 	if r.wakeDay != day {
 		r.wakeDay, r.status.WakesToday = day, 0
 	}
-	if r.status.WakesToday >= r.Config.GPU.MaxWakesPerDay {
+	if r.Config.GPU.MaxWakesPerDay > 0 && r.status.WakesToday >= r.Config.GPU.MaxWakesPerDay {
 		return false
 	}
 	r.status.WakesToday++
