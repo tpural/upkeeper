@@ -60,7 +60,7 @@ func TestCluster(t *testing.T) {
 func TestSpecAndNodes(t *testing.T) {
 	ctx := context.Background()
 	k := fake.NewClientset(
-		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "billing", Namespace: "a"}, Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "billing", Namespace: "a", Annotations: map[string]string{"lab/expected-replicas": "2", "deployment.kubernetes.io/revision": "3"}}, Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 			NodeSelector: map[string]string{"disktype": "nvme"},
 			Tolerations:  []corev1.Toleration{{Key: "possum.dev/asleep", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}},
 			Containers: []corev1.Container{{
@@ -85,13 +85,13 @@ func TestSpecAndNodes(t *testing.T) {
 	}
 	for _, want := range []string{
 		"image busybox:1.37.0", "runs: sh -c run", "LOG_LEVEL=debug", "DB_PASSWORD=(set, hidden)",
-		"LEDGER_TOKEN from secret ledger key token", "nodeSelector: disktype=nvme", "tolerations: possum.dev/asleep Exists  NoSchedule",
+		"LEDGER_TOKEN from secret ledger key token", "nodeSelector: disktype=nvme", `annotations: lab/expected-replicas="2"`, "no HPA scales it", "tolerations: possum.dev/asleep Exists  NoSchedule",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("spec lacks %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "hunter2") {
+	if strings.Contains(out, "hunter2") || strings.Contains(out, "revision") {
 		t.Error("spec shows a secret-looking value")
 	}
 	nodes, _ := c.Nodes(ctx)
