@@ -58,7 +58,7 @@ func (c *Cluster) Pods(ctx context.Context, ns string) (string, error) {
 	rows := make([]row, 0, len(list.Items))
 	for i := range list.Items {
 		p := &list.Items[i]
-		ready, total, restarts, why := containers(p)
+		ready, total, restarts, why := containers(p, c.Now())
 		bad := p.Status.Phase != corev1.PodRunning && p.Status.Phase != corev1.PodSucceeded || ready < total
 		t := fmt.Sprintf("%s %s ready %d/%d restarts %d age %s node %s", p.Name, p.Status.Phase, ready, total, restarts, age(c.Now(), p.CreationTimestamp.Time), p.Spec.NodeName)
 		if why != "" {
@@ -337,7 +337,7 @@ func Workload(p *corev1.Pod) string {
 	return "pod/" + p.Name
 }
 
-func containers(p *corev1.Pod) (ready, total int, restarts int32, why string) {
+func containers(p *corev1.Pod, now time.Time) (ready, total int, restarts int32, why string) {
 	for _, s := range p.Status.ContainerStatuses {
 		total++
 		if s.Ready {
@@ -347,7 +347,8 @@ func containers(p *corev1.Pod) (ready, total int, restarts int32, why string) {
 		if w := s.State.Waiting; w != nil && why == "" {
 			why = s.Name + " " + w.Reason
 		} else if t := s.LastTerminationState.Terminated; t != nil && why == "" && s.RestartCount > 0 {
-			why = fmt.Sprintf("%s last exit %d %s", s.Name, t.ExitCode, t.Reason)
+			// When matters as much as why: restarts count over the pod's life.
+			why = fmt.Sprintf("%s last exit %d %s %s ago", s.Name, t.ExitCode, t.Reason, age(now, t.FinishedAt.Time))
 		}
 	}
 	if total == 0 {

@@ -54,6 +54,10 @@ var Choices = []Choice{
 	{"escalate", "the fix needs something you can't do (config, code, a secret, hardware), or you're out of ideas", false},
 }
 
+// OverChoice is offered for findings, which aren't a firing alert: what they
+// found may have stopped long ago.
+var OverChoice = Choice{"over", `it isn't happening any more: it last happened over a day ago and it's healthy now; say when it last happened in "known"`, false}
+
 // SearchChoice is offered when the run may search the web.
 var SearchChoice = Choice{"search", `an error you don't understand would be explained by documentation: put a short web query in "query", ` +
 	`made of the error message and public product names only (no hostnames, IPs, pod or namespace names)`, true}

@@ -459,3 +459,23 @@ func TestSettledFix(t *testing.T) {
 		t.Errorf("outcome %q", got)
 	}
 }
+
+func TestFindingThatsOver(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeTremolo{}
+	awake := true
+	r, now := newRunner(t, f, &replies{}, &awake)
+	f.invs = []tremolo.Investigation{{ID: 4, Kind: "tuning", Title: "tunnel restarts 11 times", Status: "open", Opened: now.Add(-time.Hour)}}
+	m := &recorder{replies: []llm.Message{
+		call("pods", `{}`), call("pods", `{}`),
+		{Content: `{"known":"last restart 2d5h ago, running since","tried":"pods","missing":"","next":"over"}`},
+	}}
+	r.Agent.Model = m
+	r.Tick(ctx)
+	if got := f.took(); !strings.Contains(got, "close 4 abandoned") || strings.Contains(got, "escalate") {
+		t.Errorf("did %q", got)
+	}
+	if first := m.asked[0][1].Content; !strings.Contains(first, "First check it's still happening") {
+		t.Errorf("brief doesn't ask whether it's over:\n%s", first)
+	}
+}

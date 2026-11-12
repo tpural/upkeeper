@@ -309,9 +309,13 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 	if r.Web != nil {
 		search = func(ctx context.Context, c agent.Checkpoint) (string, error) { return r.webSearch(ctx, full, c, &refs) }
 	}
+	var choices []agent.Choice
+	if full.Kind != "incident" {
+		choices = append(slices.Clone(agent.Choices), agent.OverChoice)
+	}
 	res, err := r.Agent.Run(run, agent.Task{
 		System: cmp(r.Config.Prompt, System), User: brief(run, full, tools, r.past(ctx, full)) + r.reviewSources(ctx, full),
-		Tools: tools, MaxSteps: r.Config.Model.MaxSteps, Search: search,
+		Tools: tools, MaxSteps: r.Config.Model.MaxSteps, Search: search, Choices: choices,
 		OnCall: func(name string, args map[string]any, answer string) {
 			if name == "record" {
 				findings = append(findings, str(args, "text"))
@@ -398,6 +402,9 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 		fix := actions.changed[len(actions.changed)-1]
 		r.close(ctx, inv.ID, "fixed", "upkeeper's change worked: "+actions.settled+" The model didn't finish on its own ("+res.Stopped+").", fix, "")
 		return "fixed"
+	case res.Decided == agent.OverChoice.Name && res.Checkpoint != nil && len(actions.changed) == 0:
+		r.close(ctx, inv.ID, "abandoned", clip("Not happening any more. "+res.Checkpoint.Summary(), 2000), "", "")
+		return "over"
 	case res.Decided != "" && res.Checkpoint != nil:
 		// It stepped back and decided a person should take this.
 		escalate(strings.Join(append([]string{"upkeeper stepped back and decided to hand this over. " + res.Checkpoint.Summary()}, res.Notes...), " "))
@@ -519,6 +526,11 @@ func brief(ctx context.Context, inv tremolo.Investigation, tools []agent.Tool, p
 				}
 			}
 		}
+	}
+	if inv.Kind != "incident" {
+		b.WriteString("\nNothing is firing for this: it was found on patrol, and may be over. First check it's still happening: " +
+			"restart counts, events and error totals add up over time, so look at when it last happened. If not in the last day " +
+			"and it's healthy now, finish with status abandoned, saying when it last happened; don't diagnose an old problem.")
 	}
 	b.WriteString("\nFind the cause, fix it if you safely can, and end with finish or escalate.")
 	return b.String()
