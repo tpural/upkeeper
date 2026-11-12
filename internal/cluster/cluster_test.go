@@ -99,3 +99,21 @@ func TestSpecAndNodes(t *testing.T) {
 		t.Errorf("nodes = %q, want %q", nodes, want)
 	}
 }
+
+func TestEventMessages(t *testing.T) {
+	now := time.Date(2026, 11, 12, 3, 0, 0, 0, time.UTC)
+	ev := func(name, msg string, count int32, ago time.Duration) *corev1.Event {
+		return &corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "a"}, Type: "Warning", Reason: "Failed", Message: msg, Count: count,
+			LastTimestamp: metav1.NewTime(now.Add(-ago)), InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: "site-1"},
+		}
+	}
+	c := &Cluster{K: fake.NewClientset(
+		ev("e1", `Failed to pull image "x": failed to authorize: 401 Unauthorized`, 3, 5*time.Minute),
+		ev("e2", "Error: ImagePullBackOff", 20, time.Minute),
+	), Now: func() time.Time { return now }}
+	out, _ := c.Events(context.Background(), "a")
+	if want := "Pod/site-1 Failed ×23, last 1m ago:\n  - ×20: Error: ImagePullBackOff\n  - ×3: Failed to pull image \"x\": failed to authorize: 401 Unauthorized\n"; out != want {
+		t.Errorf("events:\n%s\nwant:\n%s", out, want)
+	}
+}

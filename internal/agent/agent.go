@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -234,6 +235,12 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			clear(nothing)
 			msgs = append(msgs, llm.Message{Role: "user", Content: refs})
 			continue
+		}
+		if continues(offer, c.Next) && unreachable(c, slices.Collect(maps.Keys(byName))) {
+			// It wants to do something none of its tools can: a person can.
+			res.Notes = append(res.Notes, "It wanted to "+strings.TrimSuffix(c.LookAt, ".")+", which none of its tools can do.")
+			c.Next = "escalate"
+			res.Checkpoint = &c
 		}
 		if !continues(offer, c.Next) {
 			res.Decided = c.Next

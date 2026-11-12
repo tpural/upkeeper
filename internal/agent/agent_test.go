@@ -157,7 +157,7 @@ func TestCheckpoint(t *testing.T) {
 
 	// Four empty answers in a row; then at most two checkpoints, and a third
 	// time round it's stopped.
-	look := say(`{"known":"k","tried":"t","missing":"m","next":"look","look_at":"x"}`)
+	look := say(`{"known":"k","tried":"t","missing":"m","next":"look","look_at":"pods, then logs with a wider start"}`)
 	var replies []llm.Message
 	for i := range 4 {
 		replies = append(replies, call("logs", fmt.Sprintf(`{"start":"%dh"}`, i+1)))
@@ -220,5 +220,19 @@ func TestSpans(t *testing.T) {
 	// The first chat said why it called pods.
 	if s := exp.GetSpans()[0]; !strings.Contains(fmt.Sprint(s.Attributes), "Checking the pods first.") {
 		t.Errorf("first chat lacks what the model said: %v", s.Attributes)
+	}
+}
+
+// TestUnreachable checks that a look none of the tools can make is escalated.
+func TestUnreachable(t *testing.T) {
+	var calls []string
+	same := call("pods", `{"namespace":"a"}`)
+	a := &Agent{Model: &script{replies: []llm.Message{
+		same, same,
+		say(`{"known":"SMTP_HOST isn't set","tried":"pods","missing":"is there an SMTP secret","next":"look","look_at":"kubectl get secrets in the namespace"}`),
+	}}, Log: slog.New(slog.DiscardHandler)}
+	res, _ := a.Run(context.Background(), Task{Tools: tools(&calls), MaxSteps: 10})
+	if res.Decided != "escalate" || len(res.Notes) != 1 || res.Notes[0] != "It wanted to kubectl get secrets in the namespace, which none of its tools can do." {
+		t.Errorf("result %+v", res)
 	}
 }
