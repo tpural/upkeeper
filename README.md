@@ -39,6 +39,23 @@ It's awake when `gpu.deployment` has a ready replica; reading that doesn't wake 
 - **With the model:** daily at `patrol.at`, and at most hourly while the GPU is awake anyway, with
   `patrol.prompt`. It only looks, and opens investigations for what it finds.
 
+## When the model goes in circles
+
+When it repeats itself, keeps finding nothing, uses most of its steps or stops calling tools, upkeeper makes it
+step back: without tools, it says what it knows, what it tried, what's missing, and what it'll do next: fix,
+look at one specific thing, or escalate. At most twice; then upkeeper escalates for it. Each step back is on
+the run's trace.
+
+With `web.searxng` set, it may also choose to search the web, once. upkeeper cleans the query (addresses, ids,
+pod and node names, and `web.private` words are removed), searches, reads the top pages on `web.allow`
+domains, and has the model quote what answers its question; a quote that isn't on the page is dropped. The
+model gets the quotes as references, never instructions.
+
+A reference it cites when it finishes or escalates goes into the runbook's `## Sources` section, as
+`unconfirmed`. Each later run of that rule promotes it to `confirmed` once a fix it led to held (or marks it
+`came back`), re-reads the page, and says in the brief whether it still says the same. A page that changed or
+went away is flagged with a runbook review, not rewritten.
+
 ## Configuration
 
 ```yaml
@@ -59,6 +76,10 @@ patrol:
   timezone: America/Chicago
   prompt: |
     Nothing is firing. Look around the lab for trouble before it becomes an alert...
+web:
+  searxng: http://searxng.searxng.svc:8080
+  allow: [kubernetes.io, fluxcd.io, github.com, stackoverflow.com]
+  private: [example-lab, my-project]
 # prompt: replaces the built-in system prompt for investigations
 ```
 

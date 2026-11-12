@@ -27,6 +27,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -38,6 +39,7 @@ import (
 	"github.com/tpural/upkeeper/internal/patrol"
 	"github.com/tpural/upkeeper/internal/runner"
 	"github.com/tpural/upkeeper/internal/tremolo"
+	"github.com/tpural/upkeeper/internal/web"
 )
 
 var version = "dev"
@@ -100,6 +102,20 @@ func run() error {
 		Checks:  checks.Check,
 		Log:     log,
 		Metrics: runner.NewMetrics(reg),
+	}
+	if cfg.Web.SearXNG != "" {
+		r.Web = web.New(cfg.Web.SearXNG, cfg.Web.Allow)
+		r.Nodes = func(ctx context.Context) ([]string, error) {
+			list, err := k.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return nil, err
+			}
+			names := make([]string, len(list.Items))
+			for i, n := range list.Items {
+				names[i] = n.Name
+			}
+			return names, nil
+		}
 	}
 	if cfg.GPU.Deployment != "" {
 		r.Awake = func(ctx context.Context) (bool, error) { return c.Awake(ctx, cfg.GPU.Deployment) }

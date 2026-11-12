@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strconv"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -52,6 +54,9 @@ type Task struct {
 	OnCall func(name string, args map[string]any, answer string)
 	// Choices are what the model may decide at a checkpoint; nil is Choices.
 	Choices []Choice
+	// Search, when set, lets the model choose to search the web at a
+	// checkpoint, once. It returns references for the model to read.
+	Search func(ctx context.Context, c Checkpoint) (string, error)
 }
 
 // Result is how a run ended.
@@ -70,6 +75,8 @@ type Result struct {
 	Checkpoint *Checkpoint
 	// Decided is the checkpoint choice that ended the run, e.g. escalate.
 	Decided string
+	// Notes are what upkeeper adds for a person, e.g. that a search found nothing.
+	Notes []string
 }
 
 // Agent runs tasks against a model.
@@ -116,6 +123,7 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 	seen := map[string]int{}    // exact calls
 	nothing := map[string]int{} // near-same calls that found nothing
 	idle, empty, checks := 0, 0, 0
+	searched := false
 	warnAt := (t.MaxSteps*6 + 9) / 10
 	warned := false
 	for res.Steps < t.MaxSteps {
@@ -182,7 +190,7 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			return res, nil
 		case why == "" && empty >= emptyCheck:
 			why = fmt.Sprintf("your last %d calls found nothing", empty)
-		case why == "" && !warned && res.Steps >= warnAt && warnAt < t.MaxSteps:
+		case why == "" && !warned && checks == 0 && res.Steps >= warnAt && warnAt < t.MaxSteps:
 			warned = true
 			why = fmt.Sprintf("you've used %d of %d steps", res.Steps, t.MaxSteps)
 		}
@@ -194,7 +202,11 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			return res, nil
 		}
 		checks++
-		c, err := a.checkpoint(ctx, tracer, msgs, choices, why, &res)
+		offer := choices
+		if t.Search != nil && !searched {
+			offer = append(slices.Clone(choices), SearchChoice)
+		}
+		c, err := a.checkpoint(ctx, tracer, msgs, offer, why, &res)
 		var stuck errNoDecision
 		if errors.As(err, &stuck) {
 			res.Stopped = stuck.Error()
@@ -208,7 +220,22 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			return res, fmt.Errorf("model: %w", err)
 		}
 		res.Checkpoint = &c
-		if !continues(choices, c.Next) {
+		if c.Next == SearchChoice.Name {
+			searched = true
+			refs, err := t.Search(ctx, c)
+			if err != nil {
+				// Nothing usable came back: the model said it needed more than
+				// the cluster shows, so a person gets it.
+				res.Notes = append(res.Notes, "It searched the web for "+strconv.Quote(c.Query)+", which found nothing usable: "+err.Error()+".")
+				res.Decided = "escalate"
+				return res, nil
+			}
+			empty, idle = 0, 0
+			clear(nothing)
+			msgs = append(msgs, llm.Message{Role: "user", Content: refs})
+			continue
+		}
+		if !continues(offer, c.Next) {
 			res.Decided = c.Next
 			return res, nil
 		}
