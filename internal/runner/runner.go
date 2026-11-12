@@ -13,6 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"github.com/tpural/upkeeper/internal/agent"
 	"github.com/tpural/upkeeper/internal/config"
 	"github.com/tpural/upkeeper/internal/patrol"
@@ -48,6 +52,7 @@ type Runner struct {
 	Log     *slog.Logger
 	Now     func() time.Time
 	Metrics *Metrics
+	Tracer  trace.Tracer
 
 	mu         sync.Mutex
 	status     Status
@@ -88,9 +93,7 @@ func (r *Runner) Run(ctx context.Context) {
 	if r.Now == nil {
 		r.Now = time.Now
 	}
-	if r.Metrics == nil {
-		r.Metrics = NewMetrics(nil)
-	}
+	r.defaults()
 	r.nextPatrol = r.patrolAfter(r.Now())
 	// The first checks wait a little, so a restart loop doesn't hammer anything.
 	r.lastChecks = r.Now().Add(-r.Config.Patrol.Every.Duration + 2*time.Minute)
@@ -109,6 +112,7 @@ func (r *Runner) Run(ctx context.Context) {
 // Tick does one round: model-free checks when due, then the next
 // investigation, or else a patrol.
 func (r *Runner) Tick(ctx context.Context) {
+	r.defaults()
 	paused, by, err := r.T.Paused(ctx)
 	if err != nil {
 		r.fail("checking tremolo", err)
@@ -145,6 +149,34 @@ func (r *Runner) Tick(ctx context.Context) {
 		}
 		r.patrol(ctx)
 	}
+}
+
+func (r *Runner) defaults() {
+	if r.Now == nil {
+		r.Now = time.Now
+	}
+	if r.Metrics == nil {
+		r.Metrics = NewMetrics(nil)
+	}
+	if r.Tracer == nil {
+		r.Tracer = noop.NewTracerProvider().Tracer("")
+	}
+}
+
+// start begins a run's span: one per investigation or patrol, the parent of
+// its model and tool calls.
+func (r *Runner) start(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	attrs = append(attrs,
+		attribute.String("gen_ai.operation.name", "invoke_agent"),
+		attribute.String("gen_ai.agent.name", r.Config.Name),
+		attribute.String("gen_ai.request.model", r.Config.Model.Name),
+	)
+	return r.Tracer.Start(ctx, "invoke_agent "+name, trace.WithAttributes(attrs...))
+}
+
+// decided notes one of upkeeper's own decisions on the run's span.
+func decided(span trace.Span, decision, why string) {
+	span.AddEvent("upkeeper.decision", trace.WithAttributes(attribute.String("upkeeper.decision", decision), attribute.String("upkeeper.reason", why)))
 }
 
 func (r *Runner) awake(ctx context.Context) bool {
@@ -205,6 +237,16 @@ func (r *Runner) wake() bool {
 
 func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool) {
 	log := r.Log.With("investigation", inv.ID, "title", inv.Title)
+	ctx, span := r.start(ctx, fmt.Sprintf("investigation #%d", inv.ID),
+		attribute.Int64("tremolo.investigation.id", inv.ID),
+		attribute.String("tremolo.investigation.kind", inv.Kind),
+		attribute.String("tremolo.investigation.title", inv.Title),
+		attribute.String("tremolo.alert.id", inv.Alert),
+		attribute.Bool("upkeeper.gpu.awake", awake),
+	)
+	defer span.End()
+	outcome := "skipped"
+	defer func() { span.SetAttributes(attribute.String("upkeeper.outcome", outcome)) }()
 	if _, err := r.T.Claim(ctx, inv.ID); err != nil {
 		if !tremolo.Refused(err) {
 			r.fail("claiming", err)
@@ -217,15 +259,21 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 		return
 	}
 	if full.Kind == "incident" && !full.AlertResolved.IsZero() {
+		decided(span, "closed untouched", "the alert resolved before upkeeper looked")
+		outcome = "resolved"
 		r.close(ctx, full.ID, "abandoned", "The alert resolved on its own before upkeeper looked; nothing was changed.", "", "")
 		return
 	}
 	if !awake {
 		if !r.wake() {
+			decided(span, "didn't wake the GPU", fmt.Sprintf("today's %d wakes are used", r.Config.GPU.MaxWakesPerDay))
+			outcome = "wake-limit"
 			r.escalate(ctx, full.ID, fmt.Sprintf("upkeeper has woken the GPU %d times today, its limit, so it didn't look at this.", r.Config.GPU.MaxWakesPerDay))
 			r.Metrics.Worked.WithLabelValues("wake-limit").Inc()
 			return
 		}
+		decided(span, "woke the GPU", "an incident has been firing for the wake delay")
+		span.SetAttributes(attribute.Bool("upkeeper.gpu.woke", true))
 		log.Info("waking the GPU")
 		r.Metrics.Wakes.Inc()
 	}
@@ -241,9 +289,13 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 
 	run, cancel := context.WithTimeout(ctx, r.Config.Model.Timeout.Duration)
 	defer cancel()
+	var findings []string
 	res, err := r.Agent.Run(run, agent.Task{
 		System: cmp(r.Config.Prompt, System), User: brief(run, full, tools), Tools: tools, MaxSteps: r.Config.Model.MaxSteps,
 		OnCall: func(name string, args map[string]any, answer string) {
+			if name == "record" {
+				findings = append(findings, str(args, "text"))
+			}
 			if slices.Contains([]string{"record", "finish", "escalate", "restart", "delete_pod", "scale", "cordon"}, name) {
 				return
 			}
@@ -256,14 +308,18 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 	if ctx.Err() != nil {
 		return // shutting down; the claim expires and someone else takes it
 	}
-	outcome := r.finish(ctx, full, res, err)
+	outcome = r.finish(ctx, full, res, findings, err)
+	span.SetAttributes(attribute.Int("upkeeper.steps", res.Steps), attribute.Int("gen_ai.usage.total_tokens", res.Tokens))
+	if res.Stopped != "" {
+		decided(span, "stopped the model", res.Stopped)
+	}
 	log.Info("done", "outcome", outcome, "steps", res.Steps, "tokens", res.Tokens)
 	r.Metrics.Worked.WithLabelValues(outcome).Inc()
 	r.set(func(s *Status) { s.LastWorked, s.LastOutcome = fmt.Sprintf("#%d %s", full.ID, full.Title), outcome })
 }
 
 // finish closes or escalates the investigation from how the run ended.
-func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agent.Result, err error) string {
+func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agent.Result, findings []string, err error) string {
 	switch {
 	case err != nil:
 		r.escalate(ctx, inv.ID, "upkeeper couldn't work this: "+err.Error())
@@ -284,9 +340,11 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 		r.escalate(ctx, inv.ID, res.Answer)
 		return "escalated"
 	}
-	why := "upkeeper stopped: " + res.Stopped + "."
-	if len(res.Last) > 0 {
-		why += " Its last steps: " + strings.Join(res.Last, "; ")
+	why := "upkeeper stopped without deciding (" + res.Stopped + ")."
+	if len(findings) > 0 {
+		why += " What it found: " + strings.Join(findings, " ")
+	} else if len(res.Last) > 0 {
+		why += " It found nothing it recorded; its last steps: " + strings.Join(res.Last, "; ")
 	}
 	r.escalate(ctx, inv.ID, why)
 	return "stopped"

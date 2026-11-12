@@ -1,5 +1,6 @@
 // Package agent runs the model in a loop over tools until it finishes, gives
-// up, or upkeeper stops it.
+// up, or upkeeper stops it. Each model call and tool call is a span, named and
+// attributed after OpenTelemetry's GenAI conventions.
 package agent
 
 import (
@@ -9,6 +10,11 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/tpural/upkeeper/internal/llm"
 )
@@ -63,14 +69,30 @@ type Result struct {
 // Agent runs tasks against a model.
 type Agent struct {
 	Model Chatter
-	Log   *slog.Logger
+	// ModelName is reported on spans.
+	ModelName string
+	Log       *slog.Logger
+	Tracer    trace.Tracer
 	// Budget is roughly how many characters of conversation to keep; older
 	// tool answers are dropped past it.
 	Budget int
 }
 
+// Nudges, and when they're given.
+const (
+	emptyNudge = 5 // tool answers in a row that found nothing
+	emptyStop  = 9
+	nudgeEmpty = "Your last %d tool calls found nothing new. You have what you're going to get: decide now. Finish if it's fixed or there's nothing to do; otherwise escalate with what you found."
+	nudgeSteps = "You've used %d of your %d steps. Wrap up now: finish, or escalate with what you found."
+	nudgeIdle  = "Use a tool to continue. When you're done, call the tool that ends the task."
+)
+
 // Run loops until a tool ends the run, the model gets stuck, or steps run out.
 func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
+	tracer := a.Tracer
+	if tracer == nil {
+		tracer = noop.NewTracerProvider().Tracer("")
+	}
 	byName := map[string]Tool{}
 	tools := make([]llm.Tool, 0, len(t.Tools))
 	for _, tl := range t.Tools {
@@ -80,14 +102,19 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 	msgs := []llm.Message{{Role: "system", Content: t.System}, {Role: "user", Content: t.User}}
 	var res Result
 	seen := map[string]int{}
-	idle := 0
+	idle, empty := 0, 0
+	warnAt := (t.MaxSteps*6 + 9) / 10
+	nudge := func(text, why string) {
+		msgs = append(msgs, llm.Message{Role: "user", Content: text})
+		trace.SpanFromContext(ctx).AddEvent("upkeeper.nudge", trace.WithAttributes(attribute.String("upkeeper.nudge", why), attribute.String("upkeeper.text", text)))
+	}
 	for res.Steps < t.MaxSteps {
 		if err := ctx.Err(); err != nil {
 			res.Stopped = "ran out of time"
 			return res, nil
 		}
 		a.trim(msgs)
-		m, u, err := a.Model.Chat(ctx, msgs, tools)
+		m, err := a.chat(ctx, tracer, msgs, tools, &res)
 		if err != nil {
 			if ctx.Err() != nil {
 				res.Stopped = "ran out of time"
@@ -95,8 +122,6 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			}
 			return res, fmt.Errorf("model: %w", err)
 		}
-		res.Steps++
-		res.Tokens += u.Prompt + u.Completion
 		msgs = append(msgs, m)
 		if len(m.ToolCalls) == 0 {
 			idle++
@@ -104,13 +129,13 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 				res.Stopped = "stopped calling tools: " + clip(m.Content, 300)
 				return res, nil
 			}
-			msgs = append(msgs, llm.Message{Role: "user", Content: "Use a tool to continue. When you're done, call the tool that ends the task."})
+			nudge(nudgeIdle, "idle")
 			continue
 		}
 		idle = 0
 		for _, call := range m.ToolCalls {
 			name := call.Function.Name
-			answer, ended, err := a.call(ctx, byName, call, seen)
+			answer, ended, err := a.call(ctx, tracer, byName, call, seen)
 			var fatal Fatal
 			if errors.As(err, &fatal) {
 				return res, fatal.Err
@@ -131,13 +156,79 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 				res.Stopped = "kept repeating " + name
 				return res, nil
 			}
+			if found(answer) {
+				empty = 0
+			} else {
+				empty++
+			}
+		}
+		switch {
+		case empty >= emptyStop:
+			res.Stopped = fmt.Sprintf("searched %d times in a row without finding anything", empty)
+			return res, nil
+		case empty == emptyNudge:
+			nudge(fmt.Sprintf(nudgeEmpty, empty), "nothing found")
+		case res.Steps == warnAt && warnAt < t.MaxSteps:
+			nudge(fmt.Sprintf(nudgeSteps, res.Steps, t.MaxSteps), "steps")
 		}
 	}
 	res.Stopped = fmt.Sprintf("used all %d steps", t.MaxSteps)
 	return res, nil
 }
 
-func (a *Agent) call(ctx context.Context, tools map[string]Tool, call llm.ToolCall, seen map[string]int) (string, bool, error) {
+// chat is one model call, as a span with what it was asked and what it said.
+func (a *Agent) chat(ctx context.Context, tracer trace.Tracer, msgs []llm.Message, tools []llm.Tool, res *Result) (llm.Message, error) {
+	ctx, span := tracer.Start(ctx, "chat "+a.ModelName, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(
+		attribute.String("gen_ai.operation.name", "chat"),
+		attribute.String("gen_ai.request.model", a.ModelName),
+		attribute.Int("upkeeper.step", res.Steps+1),
+		attribute.Int("upkeeper.messages", len(msgs)),
+	))
+	defer span.End()
+	// The newest input: what the model is answering this step.
+	if last := msgs[len(msgs)-1]; last.Role != "system" {
+		span.SetAttributes(attribute.String("upkeeper.input", clipRaw(last.Content, 4000)), attribute.String("upkeeper.input.role", last.Role))
+	}
+	m, u, err := a.Model.Chat(ctx, msgs, tools)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return m, err
+	}
+	res.Steps++
+	res.Tokens += u.Prompt + u.Completion
+	finish := "stop"
+	if len(m.ToolCalls) > 0 {
+		finish = "tool_calls"
+	}
+	out, _ := json.Marshal([]map[string]any{{"role": "assistant", "content": m.Content, "tool_calls": m.ToolCalls}})
+	span.SetAttributes(
+		attribute.Int("gen_ai.usage.input_tokens", u.Prompt),
+		attribute.Int("gen_ai.usage.output_tokens", u.Completion),
+		attribute.StringSlice("gen_ai.response.finish_reasons", []string{finish}),
+		attribute.String("gen_ai.output.messages", clipRaw(string(out), 8000)),
+		attribute.String("upkeeper.said", clipRaw(m.Content, 4000)),
+	)
+	return m, nil
+}
+
+func (a *Agent) call(ctx context.Context, tracer trace.Tracer, tools map[string]Tool, call llm.ToolCall, seen map[string]int) (string, bool, error) {
+	ctx, span := tracer.Start(ctx, "execute_tool "+call.Function.Name, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(
+		attribute.String("gen_ai.operation.name", "execute_tool"),
+		attribute.String("gen_ai.tool.name", call.Function.Name),
+		attribute.String("gen_ai.tool.call.id", call.ID),
+		attribute.String("gen_ai.tool.call.arguments", clipRaw(call.Function.Arguments, 2000)),
+	))
+	defer span.End()
+	answer, ended, err := a.run(ctx, tools, call, seen)
+	span.SetAttributes(attribute.String("gen_ai.tool.call.result", clipRaw(answer, 4000)), attribute.Bool("upkeeper.found", found(answer)))
+	if err != nil || strings.HasPrefix(answer, "Failed: ") {
+		span.SetStatus(codes.Error, clip(answer, 200))
+	}
+	return answer, ended, err
+}
+
+func (a *Agent) run(ctx context.Context, tools map[string]Tool, call llm.ToolCall, seen map[string]int) (string, bool, error) {
 	tl, ok := tools[call.Function.Name]
 	if !ok {
 		return fmt.Sprintf("There's no tool %q. Use one of the tools you were given.", call.Function.Name), false, nil
@@ -151,7 +242,7 @@ func (a *Agent) call(ctx context.Context, tools map[string]Tool, call llm.ToolCa
 	k := key(call)
 	seen[k]++
 	if seen[k] > 1 && !tl.Ends {
-		return "You already made this exact call; its answer is above. Try something different, or end the task.", false, nil
+		return repeated, false, nil
 	}
 	out, err := tl.Run(ctx, in)
 	if err != nil {
@@ -163,6 +254,18 @@ func (a *Agent) call(ctx context.Context, tools map[string]Tool, call llm.ToolCa
 		return "Failed: " + err.Error(), false, nil
 	}
 	return out, tl.Ends, nil
+}
+
+const repeated = "You already made this exact call; its answer is above. Try something different, or end the task."
+
+// found reports whether a tool's answer had anything in it.
+func found(answer string) bool {
+	for _, p := range []string{"No ", "Failed: ", repeated, "There's no tool", "Your arguments"} {
+		if strings.HasPrefix(answer, p) {
+			return false
+		}
+	}
+	return strings.TrimSpace(answer) != ""
 }
 
 // trim drops the oldest tool answers until the conversation fits the budget.
@@ -201,6 +304,14 @@ func key(call llm.ToolCall) string {
 
 func clip(s string, n int) string {
 	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
+}
+
+// clipRaw shortens s keeping its lines.
+func clipRaw(s string, n int) string {
 	if len(s) > n {
 		return s[:n] + "…"
 	}

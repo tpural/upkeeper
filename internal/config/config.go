@@ -19,6 +19,8 @@ type Config struct {
 	Model   Model   `json:"model"`
 	GPU     GPU     `json:"gpu"`
 	Patrol  Patrol  `json:"patrol"`
+	// Traces is where upkeeper sends a trace of each run; empty sends none.
+	Traces Traces `json:"traces,omitzero"`
 	// Prompt replaces the built-in system prompt for investigations.
 	Prompt string `json:"prompt,omitempty"`
 	// Every is how often to look for work.
@@ -60,6 +62,12 @@ type Patrol struct {
 	Prompt string `json:"prompt,omitempty"`
 }
 
+// Traces is an OTLP/HTTP endpoint, e.g. tremolo's ingest. The token comes from $TRACES_TOKEN.
+type Traces struct {
+	URL   string `json:"url,omitempty"`
+	Token string `json:"-"`
+}
+
 // Duration is a time.Duration written like "15m".
 type Duration struct{ time.Duration }
 
@@ -91,6 +99,7 @@ func Parse(b []byte) (Config, error) {
 		return c, err
 	}
 	c.Tremolo.Token = os.Getenv("TREMOLO_TOKEN")
+	c.Traces.Token = os.Getenv("TRACES_TOKEN")
 	or := func(d *Duration, v time.Duration) {
 		if d.Duration == 0 {
 			d.Duration = v

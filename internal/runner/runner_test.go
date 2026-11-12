@@ -183,7 +183,7 @@ func TestIncidents(t *testing.T) {
 	awake = true
 	*model = replies{call("pods", `{}`), call("pods", `{}`), call("pods", `{}`)}
 	r.Tick(ctx)
-	if got := f.took(); !strings.Contains(got, "escalate 1 upkeeper stopped: kept repeating pods. Its last steps: pods: all good") {
+	if got := f.took(); !strings.Contains(got, "escalate 1 upkeeper stopped without deciding (kept repeating pods). It found nothing it recorded; its last steps: pods: all good") {
 		t.Errorf("did %q", got)
 	}
 
