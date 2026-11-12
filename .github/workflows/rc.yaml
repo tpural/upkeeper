@@ -1,0 +1,92 @@
+name: rc
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc-${{ github.event.issue.number }}
+
+jobs:
+  rc:
+    if: github.event.issue.pull_request && (github.event.comment.body == '/rc' || startsWith(github.event.comment.body, '/rc '))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR: ${{ github.event.issue.number }}
+      ACTOR: ${{ github.event.comment.user.login }}
+      COMMENT_ID: ${{ github.event.comment.id }}
+    steps:
+      - name: Authorize
+        run: |
+          perm=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq .permission)
+          case "$perm" in
+            admin|maintain|write) ;;
+            *) echo "::error::$ACTOR has $perm access; /rc needs write access"; exit 1 ;;
+          esac
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR")
+          if [ "$(jq -r .head.repo.full_name <<<"$pr")" != "$GITHUB_REPOSITORY" ]; then
+            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "RC builds are only available for branches in this repository."
+            exit 1
+          fi
+          {
+            echo "SHA=$(jq -r .head.sha <<<"$pr")"
+            echo "TITLE<<EOF"
+            jq -r .title <<<"$pr"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content=eyes >/dev/null
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+
+      - name: Version
+        run: |
+          git fetch --tags --quiet
+          last=$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -v -- - | head -1 || true)
+          if [ -z "$last" ]; then
+            next=0.1.0
+          else
+            IFS=. read -r major minor patch <<<"${last#v}"
+            if [[ "$TITLE" =~ ^[a-z]+(\([^\)]*\))?!: ]] && [ "$major" -gt 0 ]; then
+              next="$((major + 1)).0.0"
+            elif [[ "$TITLE" =~ ^feat || "$TITLE" =~ ^[a-z]+(\([^\)]*\))?!: ]]; then
+              next="$major.$((minor + 1)).0"
+            else
+              next="$major.$minor.$((patch + 1))"
+            fi
+          fi
+          echo "VERSION=$next-rc.$PR.$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ env.VERSION }}
+          tags: ghcr.io/${{ github.repository }}:${{ env.VERSION }}
+      - name: Report
+        run: |
+          gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "RC \`$VERSION\` built from ${SHA:0:7}: \`ghcr.io/$GITHUB_REPOSITORY:$VERSION\`"
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content=rocket >/dev/null
+
+      - name: Report failure
+        if: failure() && env.SHA != ''
+        run: |
+          gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "RC build failed: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
