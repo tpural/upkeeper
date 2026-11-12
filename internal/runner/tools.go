@@ -121,6 +121,8 @@ func clusterReads(c *cluster.Cluster) []agent.Tool {
 // actionLog is what a run's actions did, for its escalation.
 type actionLog struct {
 	changed, refused []string
+	// settled is the last change's workload coming back ready, if it did.
+	settled string
 }
 
 // settleFor is how long a change waits for its workload to be ready again.
@@ -163,7 +165,11 @@ func clusterActions(c *cluster.Cluster, t *tremolo.Client, inv int64, log *actio
 		}
 		log.changed = append(log.changed, fmt.Sprintf("%s %s (why: %s)", a.Action, where, clip(a.Why, 200)))
 		if s := settle(); s != "" {
-			return "Done. " + s + " If that's healthy, finish; the alert clears on its own.", nil
+			if !strings.Contains(s, "not settled") {
+				log.settled = s
+				return "Done. " + s + " That's the fix working: finish now with status fixed. The alert takes a few minutes to clear on its own; don't wait for it.", nil
+			}
+			return "Done. " + s, nil
 		}
 		return "Done. Check that it worked (rollout, pods, or the alert) before you finish.", nil
 	}

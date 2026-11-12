@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -246,6 +247,19 @@ func TestChangeForgets(t *testing.T) {
 	a := &Agent{Model: m, Log: slog.New(slog.DiscardHandler)}
 	res, _ := a.Run(context.Background(), Task{Tools: append(tools(&calls), fix), MaxSteps: 10})
 	if res.Ended != "finish" || len(calls) != 2 || res.Checkpoint != nil {
+		t.Errorf("result %+v, pods ran %d times", res, len(calls))
+	}
+}
+
+// TestFresh checks that the same look a minute later isn't a repeat.
+func TestFresh(t *testing.T) {
+	var calls []string
+	now := time.Now()
+	look := call("pods", `{"namespace":"a"}`)
+	m := &script{replies: []llm.Message{look, look, call("finish", `{"fix":"x"}`)}}
+	a := &Agent{Model: m, Log: slog.New(slog.DiscardHandler), Now: func() time.Time { now = now.Add(70 * time.Second); return now }}
+	res, _ := a.Run(context.Background(), Task{Tools: tools(&calls), MaxSteps: 10})
+	if res.Ended != "finish" || len(calls) != 2 {
 		t.Errorf("result %+v, pods ran %d times", res, len(calls))
 	}
 }
