@@ -50,6 +50,8 @@ type Task struct {
 	MaxSteps     int
 	// OnCall is told of each tool call and its answer, e.g. to record it.
 	OnCall func(name string, args map[string]any, answer string)
+	// Choices are what the model may decide at a checkpoint; nil is Choices.
+	Choices []Choice
 }
 
 // Result is how a run ended.
@@ -64,6 +66,10 @@ type Result struct {
 	Tokens  int
 	// Last is the last few calls, for a person reading an escalation.
 	Last []string
+	// Checkpoint is the last time the model stepped back, if it did.
+	Checkpoint *Checkpoint
+	// Decided is the checkpoint choice that ended the run, e.g. escalate.
+	Decided string
 }
 
 // Agent runs tasks against a model.
@@ -78,20 +84,26 @@ type Agent struct {
 	Budget int
 }
 
-// Nudges, and when they're given.
+// When the model is stepped back, and when it's stopped.
 const (
-	emptyNudge = 5 // tool answers in a row that found nothing
-	emptyStop  = 9
-	nudgeEmpty = "Your last %d tool calls found nothing new. You have what you're going to get: decide now, and call the tool that ends the task."
-	nudgeSteps = "You've used %d of your %d steps. Wrap up now with what you found, and call the tool that ends the task."
-	nudgeIdle  = "Use a tool to continue. When you're done, call the tool that ends the task."
+	emptyCheck  = 4 // tool answers in a row that found nothing
+	emptyStop   = 9
+	maxChecks   = 2
+	repeatCheck = 2 // the same call, or the same tool finding nothing again
 )
 
-// Run loops until a tool ends the run, the model gets stuck, or steps run out.
+// Run loops until a tool ends the run, the model decides at a checkpoint, or
+// it gets stuck. When it starts going in circles (repeating itself, finding
+// nothing, using up its steps, not calling tools) it's made to step back and
+// commit to a next move, at most twice.
 func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 	tracer := a.Tracer
 	if tracer == nil {
 		tracer = noop.NewTracerProvider().Tracer("")
+	}
+	choices := t.Choices
+	if choices == nil {
+		choices = Choices
 	}
 	byName := map[string]Tool{}
 	tools := make([]llm.Tool, 0, len(t.Tools))
@@ -101,13 +113,11 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 	}
 	msgs := []llm.Message{{Role: "system", Content: t.System}, {Role: "user", Content: t.User}}
 	var res Result
-	seen := map[string]int{}
-	idle, empty := 0, 0
+	seen := map[string]int{}    // exact calls
+	nothing := map[string]int{} // near-same calls that found nothing
+	idle, empty, checks := 0, 0, 0
 	warnAt := (t.MaxSteps*6 + 9) / 10
-	nudge := func(text, why string) {
-		msgs = append(msgs, llm.Message{Role: "user", Content: text})
-		trace.SpanFromContext(ctx).AddEvent("upkeeper.nudge", trace.WithAttributes(attribute.String("upkeeper.nudge", why), attribute.String("upkeeper.text", text)))
-	}
+	warned := false
 	for res.Steps < t.MaxSteps {
 		if err := ctx.Err(); err != nil {
 			res.Stopped = "ran out of time"
@@ -123,16 +133,13 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			return res, fmt.Errorf("model: %w", err)
 		}
 		msgs = append(msgs, m)
+		why := ""
 		if len(m.ToolCalls) == 0 {
 			idle++
-			if idle >= 2 {
-				res.Stopped = "stopped calling tools: " + clip(m.Content, 300)
-				return res, nil
-			}
-			nudge(nudgeIdle, "idle")
-			continue
+			why = "you stopped calling tools"
+		} else {
+			idle = 0
 		}
-		idle = 0
 		for _, call := range m.ToolCalls {
 			name := call.Function.Name
 			answer, ended, err := a.call(ctx, tracer, byName, call, seen)
@@ -160,17 +167,57 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 				empty = 0
 			} else {
 				empty++
+				nothing[near(call)]++
+			}
+			switch {
+			case seen[key(call)] >= repeatCheck:
+				why = "you repeated a call you'd already made"
+			case nothing[near(call)] >= repeatCheck:
+				why = fmt.Sprintf("%s keeps finding nothing with small changes", name)
 			}
 		}
 		switch {
 		case empty >= emptyStop:
 			res.Stopped = fmt.Sprintf("searched %d times in a row without finding anything", empty)
 			return res, nil
-		case empty == emptyNudge:
-			nudge(fmt.Sprintf(nudgeEmpty, empty), "nothing found")
-		case res.Steps == warnAt && warnAt < t.MaxSteps:
-			nudge(fmt.Sprintf(nudgeSteps, res.Steps, t.MaxSteps), "steps")
+		case why == "" && empty >= emptyCheck:
+			why = fmt.Sprintf("your last %d calls found nothing", empty)
+		case why == "" && !warned && res.Steps >= warnAt && warnAt < t.MaxSteps:
+			warned = true
+			why = fmt.Sprintf("you've used %d of %d steps", res.Steps, t.MaxSteps)
 		}
+		if why == "" {
+			continue
+		}
+		if checks >= maxChecks || idle >= 2 {
+			res.Stopped = "kept going in circles after stepping back: " + why
+			return res, nil
+		}
+		checks++
+		c, err := a.checkpoint(ctx, tracer, msgs, choices, why, &res)
+		var stuck errNoDecision
+		if errors.As(err, &stuck) {
+			res.Stopped = stuck.Error()
+			return res, nil
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				res.Stopped = "ran out of time"
+				return res, nil
+			}
+			return res, fmt.Errorf("model: %w", err)
+		}
+		res.Checkpoint = &c
+		if !continues(choices, c.Next) {
+			res.Decided = c.Next
+			return res, nil
+		}
+		// The model committed to a move: hold it to that, and start counting afresh.
+		empty, idle = 0, 0
+		clear(nothing)
+		msgs = append(msgs, llm.Message{Role: "user", Content: fmt.Sprintf(
+			"You stepped back. What you know: %s\nDo exactly this next (%s): %s\nThen finish or escalate; don't start a new line of searching.",
+			c.Known, c.Next, c.LookAt)})
 	}
 	res.Stopped = fmt.Sprintf("used all %d steps", t.MaxSteps)
 	return res, nil
@@ -292,6 +339,24 @@ func args(call llm.ToolCall) map[string]any {
 	_ = json.Unmarshal([]byte(call.Function.Arguments), &in)
 	return in
 }
+
+// near is a call's tool and arguments without its free-text ones, so the same
+// search with other words counts as the same.
+func near(call llm.ToolCall) string {
+	var in map[string]any
+	if json.Unmarshal([]byte(call.Function.Arguments), &in) != nil {
+		return call.Function.Name
+	}
+	for k, v := range in {
+		if s, ok := v.(string); ok && (strings.Contains(s, " ") || freeText[k]) {
+			delete(in, k)
+		}
+	}
+	b, _ := json.Marshal(in)
+	return call.Function.Name + string(b)
+}
+
+var freeText = map[string]bool{"query": true, "contains": true, "q": true, "text": true, "search": true}
 
 func key(call llm.ToolCall) string {
 	var in any

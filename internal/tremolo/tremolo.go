@@ -33,6 +33,7 @@ type Investigation struct {
 	AlertResolved time.Time `json:"alertResolved,omitzero"`
 	Summary       string    `json:"summary,omitempty"`
 	Fix           string    `json:"fix,omitempty"`
+	Outcome       string    `json:"outcome,omitempty"`
 	Previous      int64     `json:"previous,omitempty"`
 	Events        []Event   `json:"events,omitempty"`
 }
@@ -165,6 +166,22 @@ func (c *Client) List(ctx context.Context, limit int, statuses ...string) ([]Inv
 	var out []Investigation
 	err := c.do(ctx, http.MethodGet, "/api/investigations", q, nil, &out)
 	return out, err
+}
+
+// Past returns the latest closed or escalated investigations of rule, with
+// their timelines.
+func (c *Client) Past(ctx context.Context, rule string, limit int) ([]Investigation, error) {
+	q := url.Values{"rule": {rule}, "limit": {fmt.Sprint(limit)}, "status": {"fixed,escalated,abandoned,resolved"}}
+	var list []Investigation
+	if err := c.do(ctx, http.MethodGet, "/api/investigations", q, nil, &list); err != nil {
+		return nil, err
+	}
+	for i := range list {
+		if full, err := c.Get(ctx, list[i].ID); err == nil {
+			list[i] = full
+		}
+	}
+	return list, nil
 }
 
 // Get returns an investigation with its timeline.

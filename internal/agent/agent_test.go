@@ -77,19 +77,28 @@ func TestRun(t *testing.T) {
 	}
 }
 
+func say(content string) llm.Message { return llm.Message{Role: "assistant", Content: content} }
+
 func TestStuck(t *testing.T) {
 	var calls []string
 	same := call("pods", `{"namespace":"a"}`)
-	a := &Agent{Model: &script{replies: []llm.Message{same, same, same, same}}, Log: slog.New(slog.DiscardHandler)}
+	decide := say(`{"known":"pods are fine","tried":"pods","missing":"","next":"escalate"}`)
+	m := &script{replies: []llm.Message{same, same, decide}}
+	a := &Agent{Model: m, Log: slog.New(slog.DiscardHandler)}
 	res, _ := a.Run(context.Background(), Task{Tools: tools(&calls), MaxSteps: 10})
-	if res.Stopped != "kept repeating pods" || len(calls) != 1 {
+	// The repeat steps it back; it decides to escalate, and the run ends there.
+	if res.Decided != "escalate" || res.Checkpoint == nil || res.Checkpoint.Known != "pods are fine" || len(calls) != 1 {
 		t.Errorf("result %+v, ran %d times", res, len(calls))
 	}
+	if got := m.seen[2][len(m.seen[2])-1].Content; !strings.Contains(got, "you repeated a call") || !strings.Contains(got, `"escalate"`) {
+		t.Errorf("checkpoint asked %q", got)
+	}
 
-	// A model that stops calling tools is nudged once, then stopped.
-	a.Model = &script{}
+	// A model that stops calling tools is stepped back; if it can't answer
+	// with a decision, twice, it's escalated.
+	a.Model = &script{replies: []llm.Message{say("Looks fine to me."), say("no idea"), say("still no idea")}}
 	res, _ = a.Run(context.Background(), Task{Tools: tools(&calls), MaxSteps: 10})
-	if !strings.HasPrefix(res.Stopped, "stopped calling tools: I'm done.") || res.Steps != 2 {
+	if res.Decided != "" || res.Checkpoint != nil || !strings.HasPrefix(res.Stopped, "couldn't say what to do next when stepping back") {
 		t.Errorf("idle result %+v", res)
 	}
 
@@ -117,32 +126,61 @@ func TestTrim(t *testing.T) {
 	}
 }
 
-func TestNudges(t *testing.T) {
-	empty := Tool{Name: "logs", Params: json.RawMessage(`{}`), Run: func(_ context.Context, a map[string]any) (string, error) {
+func TestCheckpoint(t *testing.T) {
+	empty := Tool{Name: "logs", Params: json.RawMessage(`{}`), Run: func(context.Context, map[string]any) (string, error) {
 		return "No logs match.", nil
 	}}
-	var replies []llm.Message
-	for i := range 12 {
-		replies = append(replies, call("logs", fmt.Sprintf(`{"query":"q%d"}`, i)))
+	var calls []string
+	all := append(tools(&calls), empty)
+	a := &Agent{Model: nil, Log: slog.New(slog.DiscardHandler)}
+
+	// The same search with other words, finding nothing again, steps it back. It
+	// commits to one check, which it's told to make; then it finishes.
+	m := &script{replies: []llm.Message{
+		call("logs", `{"query":"orders DATABASE_URL","start":"1h"}`),
+		call("logs", `{"query":"orders config","start":"1h"}`),
+		say(`Sure: {"known":"exits: DATABASE_URL is not set","tried":"logs","missing":"which secret","next":"look","look_at":"pods in orders"}`),
+		call("pods", `{"namespace":"orders"}`),
+		call("finish", `{"fix":"nothing"}`),
+	}}
+	a.Model = m
+	res, err := a.Run(context.Background(), Task{Tools: all, MaxSteps: 20})
+	if err != nil || res.Ended != "finish" || res.Checkpoint == nil || res.Checkpoint.Next != "look" || res.Steps != 5 {
+		t.Fatalf("result %+v, %v", res, err)
 	}
-	m := &script{replies: replies}
-	a := &Agent{Model: m, Log: slog.New(slog.DiscardHandler)}
-	res, _ := a.Run(context.Background(), Task{Tools: []Tool{empty}, MaxSteps: 30})
-	if res.Stopped != "searched 9 times in a row without finding anything" || res.Steps != 9 {
-		t.Errorf("result %+v", res)
+	if got := m.seen[2][len(m.seen[2])-1].Content; !strings.Contains(got, "logs keeps finding nothing") {
+		t.Errorf("checkpoint asked %q", got)
 	}
-	// After 5 empty answers the model is told to decide.
-	if got := m.seen[5][len(m.seen[5])-1].Content; !strings.HasPrefix(got, "Your last 5 tool calls found nothing new") {
-		t.Errorf("6th step was told %q", got)
+	if got := m.seen[3][len(m.seen[3])-1].Content; !strings.Contains(got, "Do exactly this next (look): pods in orders") {
+		t.Errorf("after the checkpoint it was told %q", got)
 	}
 
-	// At 60% of the steps it's told to wrap up.
-	m = &script{replies: []llm.Message{call("logs", `{"a":1}`), call("logs", `{"a":2}`), call("logs", `{"a":3}`), call("logs", `{"a":4}`)}}
+	// Four empty answers in a row; then at most two checkpoints, and a third
+	// time round it's stopped.
+	look := say(`{"known":"k","tried":"t","missing":"m","next":"look","look_at":"x"}`)
+	var replies []llm.Message
+	for i := range 4 {
+		replies = append(replies, call("logs", fmt.Sprintf(`{"start":"%dh"}`, i+1)))
+	}
+	replies = append(replies, look, call("logs", `{"start":"9h","query":"a b"}`), call("logs", `{"start":"9h","query":"c d"}`), look,
+		call("logs", `{"start":"8h","query":"a b"}`), call("logs", `{"start":"8h","query":"e f"}`))
+	m = &script{replies: replies}
 	a.Model = m
-	full := Tool{Name: "logs", Params: json.RawMessage(`{}`), Run: func(context.Context, map[string]any) (string, error) { return "3 lines", nil }}
+	res, _ = a.Run(context.Background(), Task{Tools: all, MaxSteps: 30})
+	if !strings.HasPrefix(res.Stopped, "kept going in circles after stepping back") {
+		t.Errorf("result %+v", res)
+	}
+	if got := m.seen[4][len(m.seen[4])-1].Content; !strings.Contains(got, "your last 4 calls found nothing") {
+		t.Errorf("first checkpoint asked %q", got)
+	}
+
+	// At 60% of the steps it steps back once.
+	full := Tool{Name: "pods", Params: json.RawMessage(`{}`), Run: func(context.Context, map[string]any) (string, error) { return "3 pods", nil }}
+	m = &script{replies: []llm.Message{call("pods", `{"a":1}`), call("pods", `{"a":2}`), call("pods", `{"a":3}`), look, call("pods", `{"a":4}`)}}
+	a.Model = m
 	_, _ = a.Run(context.Background(), Task{Tools: []Tool{full}, MaxSteps: 5})
-	if got := m.seen[3][len(m.seen[3])-1].Content; got != "You've used 3 of your 5 steps. Wrap up now with what you found, and call the tool that ends the task." {
-		t.Errorf("4th step was told %q", got)
+	if got := m.seen[3][len(m.seen[3])-1].Content; !strings.Contains(got, "you've used 3 of 5 steps") {
+		t.Errorf("4th call was %q", got)
 	}
 }
 
