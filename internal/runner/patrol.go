@@ -98,12 +98,15 @@ func (r *Runner) patrol(ctx context.Context) {
 	defer cancel()
 	res, err := r.Agent.Run(run, agent.Task{
 		System: PatrolSystem, User: cmp(r.Config.Patrol.Prompt, DefaultPatrol), Tools: tools, MaxSteps: r.Config.Model.MaxSteps,
+		Choices: patrolChoices,
 	})
 	said, outcome := res.Answer, "all clear"
 	switch {
 	case err != nil:
 		r.fail("patrol", err)
 		said, outcome = "failed: "+err.Error(), "error"
+	case res.Decided != "" && res.Checkpoint != nil:
+		said = res.Checkpoint.Summary()
 	case res.Ended == "" && strings.HasPrefix(res.Stopped, "searched"):
 		// On patrol, searching and finding nothing is the good answer.
 		said = "All clear: " + res.Stopped + "."
@@ -118,6 +121,13 @@ func (r *Runner) patrol(ctx context.Context) {
 	r.Log.Info("patrol done", "opened", opened, "steps", res.Steps, "said", clip(said, 500))
 	r.Metrics.Patrols.Inc()
 	r.set(func(s *Status) { s.LastPatrol, s.PatrolSaid = r.Now(), clip(said, 1000) })
+}
+
+// patrolChoices are what a patrol may decide when it steps back.
+var patrolChoices = []agent.Choice{
+	{Name: "look", Meaning: "one specific check is worth making: say exactly what in look_at", Continue: true},
+	{Name: "open", Meaning: "you found a real problem: say what in look_at, then open an investigation for it", Continue: true},
+	{Name: "done", Meaning: "you've looked enough: end the patrol"},
 }
 
 // patrolAfter is the next daily patrol time after t, or zero when there's none.

@@ -39,6 +39,16 @@ func (f *fakeTremolo) log(s string, a ...any) {
 	f.did = append(f.did, fmt.Sprintf(s, a...))
 }
 
+func (f *fakeTremolo) Past(_ context.Context, rule string, _ int) ([]tremolo.Investigation, error) {
+	var out []tremolo.Investigation
+	for _, i := range f.invs {
+		if i.Rule == rule && i.Status != "open" {
+			out = append(out, i)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeTremolo) Paused(context.Context) (bool, string, error) { return f.paused, "tp", nil }
 
 func (f *fakeTremolo) List(_ context.Context, _ int, statuses ...string) ([]tremolo.Investigation, error) {
@@ -197,7 +207,8 @@ func TestIncidents(t *testing.T) {
 	f.invs = append(f.invs, tremolo.Investigation{ID: 6, Kind: "incident", Title: "orders down", Status: "open", Opened: now.Add(-time.Hour)})
 	*model = replies{call("record", `{"text":"orders exits: DATABASE_URL is not set."}`), call("pods", `{}`), call("pods", `{}`), call("pods", `{}`)}
 	r.Tick(ctx)
-	if got := f.took(); !strings.Contains(got, "escalate 6 upkeeper stopped without deciding (kept repeating pods). What it found: orders exits: DATABASE_URL is not set.") {
+	if got := f.took(); !strings.Contains(got, "escalate 6 upkeeper stopped without deciding (couldn't say what to do next when stepping back") ||
+		!strings.Contains(got, "What it found: orders exits: DATABASE_URL is not set.") {
 		t.Errorf("did %q", got)
 	}
 
@@ -323,5 +334,51 @@ func TestWakesFreely(t *testing.T) {
 	}
 	if got := strings.Count(f.took(), "close"); got != 8 || r.Status().WakesToday != 8 {
 		t.Errorf("closed %d, woke %d times; want 8 and 8", got, r.Status().WakesToday)
+	}
+}
+
+// recorder is a model that answers with replies and keeps what it was asked.
+type recorder struct {
+	replies []llm.Message
+	asked   [][]llm.Message
+}
+
+func (m *recorder) Chat(_ context.Context, msgs []llm.Message, _ []llm.Tool) (llm.Message, llm.Usage, error) {
+	m.asked = append(m.asked, msgs)
+	if len(m.replies) == 0 {
+		return llm.Message{Content: "hm"}, llm.Usage{}, nil
+	}
+	r := m.replies[0]
+	m.replies = m.replies[1:]
+	return r, llm.Usage{}, nil
+}
+
+func TestDecideAndPast(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeTremolo{}
+	awake := true
+	r, now := newRunner(t, f, &replies{}, &awake)
+	f.invs = []tremolo.Investigation{
+		{ID: 1, Kind: "incident", Rule: "disk", Title: "mm02 / 91%", Status: "fixed", Fix: "Vacuumed journald", Outcome: "held", Opened: now.Add(-48 * time.Hour)},
+		{
+			ID: 2, Kind: "incident", Rule: "disk", Title: "mm02 / 93%", Status: "escalated", Opened: now.Add(-24 * time.Hour),
+			Events: []tremolo.Event{{Kind: "escalation", Text: "Images fill /var/lib/containerd; needs a bigger disk."}},
+		},
+		{ID: 3, Kind: "incident", Rule: "disk", Title: "mm02 / 95%", Status: "open", Opened: now.Add(-time.Hour)},
+	}
+	m := &recorder{replies: []llm.Message{
+		call("pods", `{}`), call("pods", `{}`),
+		{Content: `{"known":"containerd images use 80G","tried":"pods","missing":"","next":"escalate"}`},
+	}}
+	r.Agent.Model = m
+	r.Tick(ctx)
+	if got := f.took(); !strings.Contains(got, "escalate 3 upkeeper stepped back and decided to hand this over. Known: containerd images use 80G.") {
+		t.Errorf("did %q", got)
+	}
+	first := m.asked[0][1].Content
+	for _, want := range []string{"#1 ", "fixed: Vacuumed journald (it held)", "#2 ", "escalated: Images fill /var/lib/containerd"} {
+		if !strings.Contains(first, want) {
+			t.Errorf("brief lacks %q:\n%s", want, first)
+		}
 	}
 }

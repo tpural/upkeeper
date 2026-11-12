@@ -33,6 +33,7 @@ type Tremolo interface {
 	Record(ctx context.Context, id int64, kind, text string) error
 	Close(ctx context.Context, id int64, status, summary, fix, runbook string) error
 	Escalate(ctx context.Context, id int64, why string) error
+	Past(ctx context.Context, rule string, limit int) ([]tremolo.Investigation, error)
 }
 
 // Toolbox gives the model its tools for an investigation, or for a patrol when
@@ -292,7 +293,7 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 	defer cancel()
 	var findings []string
 	res, err := r.Agent.Run(run, agent.Task{
-		System: cmp(r.Config.Prompt, System), User: brief(run, full, tools), Tools: tools, MaxSteps: r.Config.Model.MaxSteps,
+		System: cmp(r.Config.Prompt, System), User: brief(run, full, tools, r.past(ctx, full)), Tools: tools, MaxSteps: r.Config.Model.MaxSteps,
 		OnCall: func(name string, args map[string]any, answer string) {
 			if name == "record" {
 				findings = append(findings, str(args, "text"))
@@ -340,9 +341,15 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 	case res.Ended == "escalate":
 		r.escalate(ctx, inv.ID, res.Answer)
 		return "escalated"
+	case res.Decided != "" && res.Checkpoint != nil:
+		// It stepped back and decided a person should take this.
+		r.escalate(ctx, inv.ID, "upkeeper stepped back and decided to hand this over. "+res.Checkpoint.Summary())
+		return "escalated"
 	}
 	why := "upkeeper stopped without deciding (" + res.Stopped + ")."
-	if len(findings) > 0 {
+	if res.Checkpoint != nil {
+		why += " When it last stepped back: " + res.Checkpoint.Summary()
+	} else if len(findings) > 0 {
 		why += " What it found: " + strings.Join(findings, " ")
 	} else if len(res.Last) > 0 {
 		why += " It found nothing it recorded; its last steps: " + strings.Join(res.Last, "; ")
@@ -375,7 +382,43 @@ func (r *Runner) fail(what string, err error) {
 }
 
 // brief is the first message: the investigation, and what's known already.
-func brief(ctx context.Context, inv tremolo.Investigation, tools []agent.Tool) string {
+// past is how the latest investigations of the same rule ended.
+func (r *Runner) past(ctx context.Context, inv tremolo.Investigation) []tremolo.Investigation {
+	if inv.Rule == "" {
+		return nil
+	}
+	list, err := r.T.Past(ctx, inv.Rule, 4)
+	if err != nil {
+		r.Log.Warn("reading past investigations", "err", err)
+	}
+	return slices.DeleteFunc(list, func(p tremolo.Investigation) bool { return p.ID == inv.ID })
+}
+
+// ended says in a line how an investigation ended.
+func ended(p tremolo.Investigation) string {
+	switch p.Status {
+	case "fixed":
+		s := "fixed: " + p.Fix
+		if p.Outcome == "recurred" {
+			s += " (it came back)"
+		} else if p.Outcome == "held" {
+			s += " (it held)"
+		}
+		return s
+	case "resolved":
+		return "went away by itself"
+	case "escalated":
+		for i := len(p.Events) - 1; i >= 0; i-- {
+			if p.Events[i].Kind == "escalation" {
+				return "escalated: " + clip(p.Events[i].Text, 400)
+			}
+		}
+		return "escalated"
+	}
+	return p.Status + ": " + clip(p.Summary, 300)
+}
+
+func brief(ctx context.Context, inv tremolo.Investigation, tools []agent.Tool, past []tremolo.Investigation) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Investigation #%d (%s): %s\n", inv.ID, inv.Kind, inv.Title)
 	if inv.Severity != "" {
@@ -392,6 +435,12 @@ func brief(ctx context.Context, inv tremolo.Investigation, tools []agent.Tool) s
 	}
 	if len(notes) > 0 {
 		b.WriteString("Timeline so far:\n" + strings.Join(notes[max(0, len(notes)-10):], "\n") + "\n")
+	}
+	if len(past) > 0 {
+		b.WriteString("\nThe last times this rule fired:\n")
+		for _, p := range past[:min(3, len(past))] {
+			fmt.Fprintf(&b, "- #%d %s (%s): %s\n", p.ID, p.Opened.Format("Jan 2"), clip(p.Title, 100), ended(p))
+		}
 	}
 	if inv.Alert != "" {
 		for _, t := range tools {

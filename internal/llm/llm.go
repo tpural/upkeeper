@@ -60,6 +60,15 @@ func New(url, model string) *Client {
 
 // Chat sends the conversation and returns the model's reply.
 func (c *Client) Chat(ctx context.Context, msgs []Message, tools []Tool) (Message, Usage, error) {
+	return c.chat(ctx, msgs, tools, nil)
+}
+
+// ChatJSON asks for a reply that's a JSON object matching schema.
+func (c *Client) ChatJSON(ctx context.Context, msgs []Message, schema json.RawMessage) (Message, Usage, error) {
+	return c.chat(ctx, msgs, nil, schema)
+}
+
+func (c *Client) chat(ctx context.Context, msgs []Message, tools []Tool, schema json.RawMessage) (Message, Usage, error) {
 	type function struct {
 		Name        string          `json:"name"`
 		Description string          `json:"description"`
@@ -70,6 +79,9 @@ func (c *Client) Chat(ctx context.Context, msgs []Message, tools []Tool) (Messag
 		Function function `json:"function"`
 	}
 	body := map[string]any{"model": c.Model, "messages": msgs, "temperature": 0.2}
+	if schema != nil {
+		body["response_format"] = map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "answer", "schema": schema}}
+	}
 	if len(tools) > 0 {
 		ts := make([]tool, len(tools))
 		for i, t := range tools {
