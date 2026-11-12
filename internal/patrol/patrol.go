@@ -49,11 +49,21 @@ func (c *Checker) Check(ctx context.Context) []Finding {
 	pods, err := c.K.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	if err == nil {
 		out = append(out, c.pods(pods.Items)...)
+	} else {
+		pods = nil
 	}
 	if nodes, err := c.K.CoreV1().Nodes().List(ctx, metav1.ListOptions{}); err == nil {
 		out = append(out, c.nodes(nodes.Items)...)
 	}
-	if evs, err := c.K.CoreV1().Events("").List(ctx, metav1.ListOptions{FieldSelector: "type=Warning"}); err == nil {
+	if evs, err := c.K.CoreV1().Events("").List(ctx, metav1.ListOptions{FieldSelector: "type=Warning"}); err == nil && pods != nil {
+		// Warnings outlive their pods by an hour; only those of pods still here matter.
+		live := map[string]bool{}
+		for _, p := range pods.Items {
+			live[p.Namespace+"/"+p.Name] = true
+		}
+		evs.Items = slices.DeleteFunc(evs.Items, func(e corev1.Event) bool {
+			return e.InvolvedObject.Kind == "Pod" && !live[e.InvolvedObject.Namespace+"/"+e.InvolvedObject.Name]
+		})
 		out = append(out, c.events(evs.Items)...)
 	}
 	if c.Coverage != nil {

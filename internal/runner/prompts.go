@@ -16,7 +16,7 @@ How to work:
    If tremolo refuses an action, don't work around it.
 5. Check it worked (rollout, pods, the alert) before you finish.
 6. Call finish with status fixed and the fix in one line. If the runbook was wrong or missing a step, fix it with edit_runbook.
-   If there was nothing to do (it fixed itself), finish with status abandoned and say why.
+   If there was nothing to do (it fixed itself, or what it's about no longer exists), finish with status abandoned and say why.
 7. Escalate when the fix needs something you can't do (edit config or code, a secret, hardware, a node reboot),
    when you'd be guessing, or when you've tried and it didn't work. Say what you found and what a person should do.
 

@@ -82,8 +82,8 @@ type Agent struct {
 const (
 	emptyNudge = 5 // tool answers in a row that found nothing
 	emptyStop  = 9
-	nudgeEmpty = "Your last %d tool calls found nothing new. You have what you're going to get: decide now. Finish if it's fixed or there's nothing to do; otherwise escalate with what you found."
-	nudgeSteps = "You've used %d of your %d steps. Wrap up now: finish, or escalate with what you found."
+	nudgeEmpty = "Your last %d tool calls found nothing new. You have what you're going to get: decide now, and call the tool that ends the task."
+	nudgeSteps = "You've used %d of your %d steps. Wrap up now with what you found, and call the tool that ends the task."
 	nudgeIdle  = "Use a tool to continue. When you're done, call the tool that ends the task."
 )
 
@@ -221,7 +221,7 @@ func (a *Agent) call(ctx context.Context, tracer trace.Tracer, tools map[string]
 	))
 	defer span.End()
 	answer, ended, err := a.run(ctx, tools, call, seen)
-	span.SetAttributes(attribute.String("gen_ai.tool.call.result", clipRaw(answer, 4000)), attribute.Bool("upkeeper.found", found(answer)))
+	span.SetAttributes(attribute.String("gen_ai.tool.call.result", clipRaw(answer, 4000)), attribute.Bool("tremolo.tool.found", found(answer)))
 	if err != nil || strings.HasPrefix(answer, "Failed: ") {
 		span.SetStatus(codes.Error, clip(answer, 200))
 	}

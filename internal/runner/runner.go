@@ -238,6 +238,7 @@ func (r *Runner) wake() bool {
 func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool) {
 	log := r.Log.With("investigation", inv.ID, "title", inv.Title)
 	ctx, span := r.start(ctx, fmt.Sprintf("investigation #%d", inv.ID),
+		attribute.String("tremolo.task", "investigation"),
 		attribute.Int64("tremolo.investigation.id", inv.ID),
 		attribute.String("tremolo.investigation.kind", inv.Kind),
 		attribute.String("tremolo.investigation.title", inv.Title),
@@ -246,7 +247,7 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 	)
 	defer span.End()
 	outcome := "skipped"
-	defer func() { span.SetAttributes(attribute.String("upkeeper.outcome", outcome)) }()
+	defer func() { span.SetAttributes(attribute.String("tremolo.outcome", outcome)) }()
 	if _, err := r.T.Claim(ctx, inv.ID); err != nil {
 		if !tremolo.Refused(err) {
 			r.fail("claiming", err)
@@ -345,6 +346,12 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 		why += " What it found: " + strings.Join(findings, " ")
 	} else if len(res.Last) > 0 {
 		why += " It found nothing it recorded; its last steps: " + strings.Join(res.Last, "; ")
+	}
+	if inv.Kind != "incident" {
+		// Nothing is firing: a person needn't hear that the model was confused. The
+		// summary keeps why, and the same finding isn't reopened for a week.
+		r.close(ctx, inv.ID, "abandoned", clip(why, 2000), "", "")
+		return "stopped"
 	}
 	r.escalate(ctx, inv.ID, why)
 	return "stopped"
