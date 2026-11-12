@@ -93,7 +93,7 @@ func (c *Cluster) Pod(ctx context.Context, ns, name string) (string, error) {
 	for _, s := range append(slices.Clone(p.Status.InitContainerStatuses), p.Status.ContainerStatuses...) {
 		fmt.Fprintf(&b, "container %s: ready %v, restarts %d, %s", s.Name, s.Ready, s.RestartCount, state(s.State))
 		if t := s.LastTerminationState.Terminated; t != nil {
-			fmt.Fprintf(&b, "; last exit %d (%s) %s ago %s", t.ExitCode, t.Reason, age(c.Now(), t.FinishedAt.Time), strings.TrimSpace(t.Message))
+			fmt.Fprintf(&b, "; last exit %d (%s%s) %s ago %s", t.ExitCode, t.Reason, signal(t), age(c.Now(), t.FinishedAt.Time), strings.TrimSpace(t.Message))
 		}
 		b.WriteString("\n")
 	}
@@ -378,6 +378,20 @@ func containers(p *corev1.Pod, now time.Time) (ready, total int, restarts int32,
 		}
 	}
 	return ready, total, restarts, why
+}
+
+// signal says what killed a container that exited by a signal, which exit
+// codes alone are easily misread as.
+func signal(t *corev1.ContainerStateTerminated) string {
+	switch {
+	case t.Reason == "OOMKilled":
+		return ""
+	case t.ExitCode == 137:
+		return ", killed by SIGKILL: a failed liveness probe or a kill, not out of memory"
+	case t.ExitCode == 143:
+		return ", stopped by SIGTERM"
+	}
+	return ""
 }
 
 func state(s corev1.ContainerState) string {
