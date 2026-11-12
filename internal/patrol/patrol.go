@@ -69,7 +69,9 @@ func (c *Checker) Check(ctx context.Context) []Finding {
 	if c.Coverage != nil {
 		if gaps, err := c.Coverage(ctx); err == nil {
 			for _, g := range gaps {
-				if g.Kind == "check" {
+				// A failed check is tremolo's own problem; missing traces mean
+				// instrumenting code, which no agent can do.
+				if g.Kind == "check" || g.Kind == "traces" {
 					continue
 				}
 				out = append(out, Finding{"gap", fmt.Sprintf("Coverage: %s %s", g.Kind, g.Subject), g.Detail})
