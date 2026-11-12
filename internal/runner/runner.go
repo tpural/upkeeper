@@ -347,11 +347,12 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 		return "escalated"
 	}
 	why := "upkeeper stopped without deciding (" + res.Stopped + ")."
-	if res.Checkpoint != nil {
+	switch {
+	case res.Checkpoint != nil:
 		why += " When it last stepped back: " + res.Checkpoint.Summary()
-	} else if len(findings) > 0 {
+	case len(findings) > 0:
 		why += " What it found: " + strings.Join(findings, " ")
-	} else if len(res.Last) > 0 {
+	case len(res.Last) > 0:
 		why += " It found nothing it recorded; its last steps: " + strings.Join(res.Last, "; ")
 	}
 	if inv.Kind != "incident" {
@@ -399,9 +400,10 @@ func ended(p tremolo.Investigation) string {
 	switch p.Status {
 	case "fixed":
 		s := "fixed: " + p.Fix
-		if p.Outcome == "recurred" {
+		switch p.Outcome {
+		case "recurred":
 			s += " (it came back)"
-		} else if p.Outcome == "held" {
+		case "held":
 			s += " (it held)"
 		}
 		return s
