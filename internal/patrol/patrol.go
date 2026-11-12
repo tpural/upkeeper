@@ -25,6 +25,8 @@ type Finding struct {
 	Kind  string // tuning or gap
 	Title string
 	Text  string
+	// About is the namespace/name of the workload it's about, if any.
+	About string
 }
 
 // Checker runs the checks.
@@ -74,7 +76,7 @@ func (c *Checker) Check(ctx context.Context) []Finding {
 				if g.Kind == "check" || g.Kind == "traces" {
 					continue
 				}
-				out = append(out, Finding{"gap", fmt.Sprintf("Coverage: %s %s", g.Kind, g.Subject), g.Detail})
+				out = append(out, Finding{Kind: "gap", Title: fmt.Sprintf("Coverage: %s %s", g.Kind, g.Subject), Text: g.Detail})
 			}
 		}
 	}
@@ -94,6 +96,7 @@ func (c *Checker) pods(pods []corev1.Pod) []Finding {
 	for i := range pods {
 		p := &pods[i]
 		w := p.Namespace + "/" + cluster.Workload(p)
+		about := p.Namespace + "/" + cluster.Workload(p)[strings.Index(cluster.Workload(p), "/")+1:]
 		if p.Status.Phase == corev1.PodPending && now.Sub(p.CreationTimestamp.Time) > 15*time.Minute && !seen["pending "+w] {
 			seen["pending "+w] = true
 			why := "it hasn't started"
@@ -107,7 +110,7 @@ func (c *Checker) pods(pods []corev1.Pod) []Finding {
 					why = s.Name + " is waiting: " + s.State.Waiting.Reason + " " + s.State.Waiting.Message
 				}
 			}
-			out = append(out, Finding{"tuning", "Pending: " + w, fmt.Sprintf("Pod %s has been pending for %s; %s", p.Name, now.Sub(p.CreationTimestamp.Time).Round(time.Minute), why)})
+			out = append(out, Finding{"tuning", "Pending: " + w, fmt.Sprintf("Pod %s has been pending for %s; %s", p.Name, now.Sub(p.CreationTimestamp.Time).Round(time.Minute), why), about})
 		}
 		for _, s := range p.Status.ContainerStatuses {
 			k := p.Namespace + "/" + p.Name + "/" + s.Name
@@ -130,7 +133,7 @@ func (c *Checker) pods(pods []corev1.Pod) []Finding {
 				if t := s.LastTerminationState.Terminated; t != nil {
 					why = fmt.Sprintf(" Its last exit: %d (%s).", t.ExitCode, t.Reason)
 				}
-				out = append(out, Finding{"tuning", "Restarting: " + w + " " + s.Name, fmt.Sprintf("Container %s of pod %s restarted %d times since the last check.%s", s.Name, p.Name, d, why)})
+				out = append(out, Finding{"tuning", "Restarting: " + w + " " + s.Name, fmt.Sprintf("Container %s of pod %s restarted %d times since the last check.%s", s.Name, p.Name, d, why), about})
 			}
 		}
 	}
@@ -148,9 +151,9 @@ func (c *Checker) nodes(nodes []corev1.Node) []Finding {
 		for _, cd := range n.Status.Conditions {
 			switch {
 			case cd.Type == corev1.NodeReady && cd.Status != corev1.ConditionTrue && c.Now().Sub(cd.LastTransitionTime.Time) > 10*time.Minute:
-				out = append(out, Finding{"tuning", "Node not ready: " + n.Name, fmt.Sprintf("%s has been NotReady since %s: %s %s", n.Name, cd.LastTransitionTime.UTC().Format(time.RFC3339), cd.Reason, cd.Message)})
+				out = append(out, Finding{"tuning", "Node not ready: " + n.Name, fmt.Sprintf("%s has been NotReady since %s: %s %s", n.Name, cd.LastTransitionTime.UTC().Format(time.RFC3339), cd.Reason, cd.Message), ""})
 			case cd.Type != corev1.NodeReady && cd.Status == corev1.ConditionTrue && strings.HasSuffix(string(cd.Type), "Pressure"):
-				out = append(out, Finding{"tuning", fmt.Sprintf("Node %s: %s", n.Name, cd.Type), fmt.Sprintf("%s reports %s: %s", n.Name, cd.Type, cd.Message)})
+				out = append(out, Finding{"tuning", fmt.Sprintf("Node %s: %s", n.Name, cd.Type), fmt.Sprintf("%s reports %s: %s", n.Name, cd.Type, cd.Message), ""})
 			}
 		}
 	}
@@ -164,8 +167,9 @@ var noisy = []string{"FailedMount", "FailedAttachVolume", "Unhealthy", "BackOff"
 func (c *Checker) events(evs []corev1.Event) []Finding {
 	since := c.Now().Add(-time.Hour)
 	type group struct {
-		n   int32
-		msg string
+		n     int32
+		msg   string
+		about string
 	}
 	groups := map[string]*group{}
 	for i := range evs {
@@ -176,7 +180,7 @@ func (c *Checker) events(evs []corev1.Event) []Finding {
 		k := fmt.Sprintf("%s %s/%s/%s", e.Reason, e.InvolvedObject.Namespace, strings.ToLower(e.InvolvedObject.Kind), owner(e.InvolvedObject))
 		g := groups[k]
 		if g == nil {
-			g = &group{}
+			g = &group{about: e.InvolvedObject.Namespace + "/" + owner(e.InvolvedObject)}
 			groups[k] = g
 		}
 		g.n += max(e.Count, 1)
@@ -192,7 +196,7 @@ func (c *Checker) events(evs []corev1.Event) []Finding {
 	out := make([]Finding, 0, len(keys))
 	for _, k := range keys {
 		g := groups[k]
-		out = append(out, Finding{"tuning", "Warnings: " + k, fmt.Sprintf("%d warnings in the last hour; the latest: %s", g.n, g.msg)})
+		out = append(out, Finding{"tuning", "Warnings: " + k, fmt.Sprintf("%d warnings in the last hour; the latest: %s", g.n, g.msg), g.about})
 	}
 	return out
 }

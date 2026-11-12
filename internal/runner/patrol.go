@@ -21,8 +21,16 @@ const quiet = 7 * 24 * time.Hour
 func (r *Runner) check(ctx context.Context) {
 	findings := r.Checks(ctx)
 	opened := 0
+	seen := map[string]bool{}
 	for _, f := range findings {
+		// One problem often shows as warnings, restarts and pending at once.
+		if f.About != "" && seen[f.About] {
+			continue
+		}
 		ok, err := r.openFinding(ctx, f)
+		if ok && f.About != "" {
+			seen[f.About] = true
+		}
 		if err != nil {
 			r.fail("opening a finding", err)
 			continue
@@ -47,7 +55,9 @@ func (r *Runner) openFinding(ctx context.Context, f patrol.Finding) (bool, error
 	}
 	now := r.Now()
 	if slices.ContainsFunc(list, func(i tremolo.Investigation) bool {
-		return i.Title == f.Title && (i.Closed.IsZero() || now.Sub(i.Closed) < quiet)
+		// An alert or finding already being handled for the same workload covers this.
+		return i.Title == f.Title && (i.Closed.IsZero() || now.Sub(i.Closed) < quiet) ||
+			f.About != "" && i.Closed.IsZero() && strings.Contains(i.Title, f.About)
 	}) {
 		return false, nil
 	}

@@ -479,3 +479,22 @@ func TestFindingThatsOver(t *testing.T) {
 		t.Errorf("brief doesn't ask whether it's over:\n%s", first)
 	}
 }
+
+func TestFindingsOncePerWorkload(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeTremolo{}
+	awake := true
+	r, now := newRunner(t, f, &replies{}, &awake)
+	f.invs = []tremolo.Investigation{{ID: 1, Kind: "incident", Title: "sim-probe/billing-6697c86cb7-kjvbv restarted 6 times in 30 minutes", Status: "escalated", Opened: now.Add(-time.Hour)}}
+	r.Checks = func(context.Context) []patrol.Finding {
+		return []patrol.Finding{
+			{Kind: "tuning", Title: "Warnings: BackOff sim-probe/pod/billing", About: "sim-probe/billing"},
+			{Kind: "tuning", Title: "Warnings: Unhealthy web/pod/api", About: "web/api"},
+			{Kind: "tuning", Title: "Warnings: BackOff web/pod/api", About: "web/api"},
+		}
+	}
+	r.check(ctx)
+	if got := f.took(); got != "open tuning Warnings: Unhealthy web/pod/api" {
+		t.Errorf("opened %q", got)
+	}
+}

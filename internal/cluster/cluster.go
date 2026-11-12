@@ -739,6 +739,9 @@ func (c *Cluster) Hopeless(ctx context.Context, ns, kind, name string) (string, 
 		if w == "" {
 			w = c.crashedOn(ctx, &pods[i])
 		}
+		if w == "" {
+			w = c.probeKilled(ctx, &pods[i])
+		}
 		if w == "" && !ready(&pods[i]) {
 			return "", nil // a pod that's failing for a reason a fresh one may not have
 		}
@@ -790,6 +793,30 @@ func (c *Cluster) crashedOn(ctx context.Context, p *corev1.Pod) string {
 		_ = rc.Close()
 		if strings.Contains(string(b), "exec format error") {
 			return s.Name + "'s image is built for another CPU architecture (exec format error)"
+		}
+	}
+	return ""
+}
+
+// probeKilled says whether the kubelet keeps restarting a container for
+// failing its liveness probe: it has already done what a restart would, and a
+// new pod gets the same probe.
+func (c *Cluster) probeKilled(ctx context.Context, p *corev1.Pod) string {
+	var restarts int32
+	for _, s := range p.Status.ContainerStatuses {
+		restarts = max(restarts, s.RestartCount)
+	}
+	if restarts < 3 {
+		return ""
+	}
+	evs, err := c.K.CoreV1().Events(p.Namespace).List(ctx, metav1.ListOptions{FieldSelector: "involvedObject.name=" + p.Name})
+	if err != nil {
+		return ""
+	}
+	since := c.Now().Add(-time.Hour)
+	for _, e := range evs.Items {
+		if e.InvolvedObject.Name == p.Name && e.Reason == "Unhealthy" && strings.HasPrefix(e.Message, "Liveness probe failed") && !lastSeen(&e).Before(since) {
+			return fmt.Sprintf("the kubelet has restarted it %d times for failing its liveness probe (%s), and a new pod gets the same probe", restarts, clip(e.Message, 160))
 		}
 	}
 	return ""
