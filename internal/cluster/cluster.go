@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -383,4 +384,205 @@ func clip(s string, n int) string {
 		return s[:n] + "…"
 	}
 	return s
+}
+
+// reSecretName is an env var whose literal value isn't shown.
+var reSecretName = regexp.MustCompile(`(?i)pass|secret|token|key|cred|auth|private|cert`)
+
+// Spec describes what a deployment, statefulset, daemonset or pod asks for:
+// containers (image, command, env names and where each comes from, resources),
+// scheduling (nodeSelector, affinity, tolerations) and volumes. Secret values
+// are never read; a literal value with a secret-like name is hidden.
+func (c *Cluster) Spec(ctx context.Context, ns, kind, name string) (string, error) {
+	var spec corev1.PodSpec
+	var b strings.Builder
+	switch kind {
+	case "deployment":
+		d, err := c.K.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		spec = d.Spec.Template.Spec
+		fmt.Fprintf(&b, "deployment %s/%s, replicas %d\n", ns, name, ptr(d.Spec.Replicas, 1))
+	case "statefulset":
+		s, err := c.K.AppsV1().StatefulSets(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		spec = s.Spec.Template.Spec
+		fmt.Fprintf(&b, "statefulset %s/%s, replicas %d\n", ns, name, ptr(s.Spec.Replicas, 1))
+	case "daemonset":
+		d, err := c.K.AppsV1().DaemonSets(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		spec = d.Spec.Template.Spec
+		fmt.Fprintf(&b, "daemonset %s/%s\n", ns, name)
+	case "pod":
+		p, err := c.K.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		spec = p.Spec
+		fmt.Fprintf(&b, "pod %s/%s\n", ns, name)
+	default:
+		return "", errors.New("kind must be deployment, statefulset, daemonset or pod")
+	}
+	for _, ct := range append(slices.Clone(spec.InitContainers), spec.Containers...) {
+		fmt.Fprintf(&b, "container %s: image %s\n", ct.Name, ct.Image)
+		if len(ct.Command)+len(ct.Args) > 0 {
+			fmt.Fprintf(&b, "  runs: %s\n", clip(strings.Join(append(slices.Clone(ct.Command), ct.Args...), " "), 300))
+		}
+		var env []string
+		for _, e := range ct.Env {
+			switch v := e.ValueFrom; {
+			case v == nil && reSecretName.MatchString(e.Name):
+				env = append(env, e.Name+"=(set, hidden)")
+			case v == nil:
+				env = append(env, e.Name+"="+clip(e.Value, 80))
+			case v.SecretKeyRef != nil:
+				env = append(env, fmt.Sprintf("%s from secret %s key %s", e.Name, v.SecretKeyRef.Name, v.SecretKeyRef.Key))
+			case v.ConfigMapKeyRef != nil:
+				env = append(env, fmt.Sprintf("%s from configmap %s key %s", e.Name, v.ConfigMapKeyRef.Name, v.ConfigMapKeyRef.Key))
+			case v.FieldRef != nil:
+				env = append(env, e.Name+" from field "+v.FieldRef.FieldPath)
+			default:
+				env = append(env, e.Name+" from elsewhere")
+			}
+		}
+		for _, f := range ct.EnvFrom {
+			switch {
+			case f.SecretRef != nil:
+				env = append(env, "every key of secret "+f.SecretRef.Name)
+			case f.ConfigMapRef != nil:
+				env = append(env, "every key of configmap "+f.ConfigMapRef.Name)
+			}
+		}
+		if len(env) == 0 {
+			env = []string{"none"}
+		}
+		fmt.Fprintf(&b, "  env: %s\n", strings.Join(env, "; "))
+		var res []string
+		for k, v := range ct.Resources.Requests {
+			res = append(res, "request "+string(k)+"="+v.String())
+		}
+		for k, v := range ct.Resources.Limits {
+			res = append(res, "limit "+string(k)+"="+v.String())
+		}
+		sort.Strings(res)
+		if len(res) > 0 {
+			fmt.Fprintf(&b, "  resources: %s\n", strings.Join(res, ", "))
+		}
+		if ct.ReadinessProbe != nil || ct.LivenessProbe != nil {
+			fmt.Fprintf(&b, "  probes: %s\n", probes(ct))
+		}
+	}
+	if len(spec.NodeSelector) > 0 {
+		var sel []string
+		for k, v := range spec.NodeSelector {
+			sel = append(sel, k+"="+v)
+		}
+		sort.Strings(sel)
+		fmt.Fprintf(&b, "nodeSelector: %s\n", strings.Join(sel, ", "))
+	}
+	if a := spec.Affinity; a != nil && a.NodeAffinity != nil && a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution != nil {
+		var terms []string
+		for _, t := range a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms {
+			for _, e := range t.MatchExpressions {
+				terms = append(terms, fmt.Sprintf("%s %s %s", e.Key, e.Operator, strings.Join(e.Values, ",")))
+			}
+		}
+		fmt.Fprintf(&b, "node affinity (required): %s\n", strings.Join(terms, "; "))
+	}
+	if len(spec.Tolerations) > 0 {
+		var tol []string
+		for _, t := range spec.Tolerations {
+			tol = append(tol, strings.TrimSpace(fmt.Sprintf("%s %s %s %s", t.Key, t.Operator, t.Value, t.Effect)))
+		}
+		fmt.Fprintf(&b, "tolerations: %s\n", strings.Join(tol, "; "))
+	}
+	if len(spec.Volumes) > 0 {
+		var vols []string
+		for _, v := range spec.Volumes {
+			switch {
+			case v.PersistentVolumeClaim != nil:
+				vols = append(vols, v.Name+": pvc "+v.PersistentVolumeClaim.ClaimName)
+			case v.Secret != nil:
+				vols = append(vols, v.Name+": secret "+v.Secret.SecretName)
+			case v.ConfigMap != nil:
+				vols = append(vols, v.Name+": configmap "+v.ConfigMap.Name)
+			case v.HostPath != nil:
+				vols = append(vols, v.Name+": hostPath "+v.HostPath.Path)
+			case v.EmptyDir != nil:
+				vols = append(vols, v.Name+": emptyDir")
+			default:
+				vols = append(vols, v.Name)
+			}
+		}
+		fmt.Fprintf(&b, "volumes: %s\n", strings.Join(vols, "; "))
+	}
+	return b.String(), nil
+}
+
+func probes(ct corev1.Container) string {
+	var out []string
+	for _, p := range []struct {
+		name string
+		p    *corev1.Probe
+	}{{"readiness", ct.ReadinessProbe}, {"liveness", ct.LivenessProbe}} {
+		if p.p == nil {
+			continue
+		}
+		what := "probe"
+		switch h := p.p.ProbeHandler; {
+		case h.HTTPGet != nil:
+			what = "GET " + h.HTTPGet.Path + " on " + h.HTTPGet.Port.String()
+		case h.TCPSocket != nil:
+			what = "TCP " + h.TCPSocket.Port.String()
+		case h.Exec != nil:
+			what = "exec " + clip(strings.Join(h.Exec.Command, " "), 100)
+		}
+		out = append(out, fmt.Sprintf("%s %s every %ds, fails after %d", p.name, what, max(p.p.PeriodSeconds, 10), max(p.p.FailureThreshold, 3)))
+	}
+	return strings.Join(out, "; ")
+}
+
+// Nodes lists nodes with what scheduling looks at: ready, schedulable,
+// architecture, the labels people set, and taints.
+func (c *Cluster) Nodes(ctx context.Context) (string, error) {
+	list, err := c.K.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, n := range list.Items {
+		ready := "NotReady"
+		for _, cd := range n.Status.Conditions {
+			if cd.Type == corev1.NodeReady && cd.Status == corev1.ConditionTrue {
+				ready = "Ready"
+			}
+		}
+		if n.Spec.Unschedulable {
+			ready += ",cordoned"
+		}
+		var labels []string
+		for k, v := range n.Labels {
+			if strings.Contains(k, "kubernetes.io/") && k != "kubernetes.io/arch" && !strings.HasPrefix(k, "node-role.") ||
+				strings.HasPrefix(k, "feature.node.") || strings.HasPrefix(k, "nvidia.com/") || strings.HasPrefix(k, "beta.") {
+				continue
+			}
+			labels = append(labels, k+"="+v)
+		}
+		sort.Strings(labels)
+		var taints []string
+		for _, t := range n.Spec.Taints {
+			taints = append(taints, strings.TrimSuffix(t.Key+"="+t.Value, "=")+":"+string(t.Effect))
+		}
+		fmt.Fprintf(&b, "%s %s labels: %s", n.Name, ready, strings.Join(labels, " "))
+		if len(taints) > 0 {
+			fmt.Fprintf(&b, " taints: %s", strings.Join(taints, " "))
+		}
+		b.WriteString("\n")
+	}
+	return b.String(), nil
 }

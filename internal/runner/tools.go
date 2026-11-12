@@ -94,6 +94,20 @@ func clusterReads(c *cluster.Cluster) []agent.Tool {
 			},
 		},
 		{
+			Name: "spec", Description: "What a deployment, statefulset, daemonset or pod is set up with: images, command, env var names and where each comes from (never secret values), resources, probes, nodeSelector, affinity, tolerations, volumes.",
+			Params: schema(pNamespace+`,"kind":{"type":"string","enum":["deployment","statefulset","daemonset","pod"]},"name":{"type":"string"}`, "namespace", "kind", "name"),
+			Run: func(ctx context.Context, a map[string]any) (string, error) {
+				return c.Spec(ctx, str(a, "namespace"), str(a, "kind"), str(a, "name"))
+			},
+		},
+		{
+			Name: "nodes", Description: "Every node: ready or not, cordoned, its architecture and the labels people set, and its taints. For why a pod can't be scheduled.",
+			Params: schema(""),
+			Run: func(ctx context.Context, _ map[string]any) (string, error) {
+				return c.Nodes(ctx)
+			},
+		},
+		{
 			Name: "rollout", Description: "How a deployment, statefulset or daemonset is doing: wanted, ready and updated replicas, and failing conditions.",
 			Params: schema(pNamespace+","+pKind+","+pName, "namespace", "kind", "name"),
 			Run: func(ctx context.Context, a map[string]any) (string, error) {

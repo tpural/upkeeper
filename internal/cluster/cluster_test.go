@@ -56,3 +56,46 @@ func TestCluster(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestSpecAndNodes(t *testing.T) {
+	ctx := context.Background()
+	k := fake.NewClientset(
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "billing", Namespace: "a"}, Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			NodeSelector: map[string]string{"disktype": "nvme"},
+			Tolerations:  []corev1.Toleration{{Key: "possum.dev/asleep", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}},
+			Containers: []corev1.Container{{
+				Name: "billing", Image: "busybox:1.37.0", Command: []string{"sh", "-c", "run"},
+				Env: []corev1.EnvVar{
+					{Name: "LOG_LEVEL", Value: "debug"},
+					{Name: "DB_PASSWORD", Value: "hunter2"},
+					{Name: "LEDGER_TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "ledger"}, Key: "token"}}},
+				},
+			}},
+		}}}},
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "pi-1", Labels: map[string]string{"kubernetes.io/arch": "arm64", "kubernetes.io/hostname": "pi-1", "node-role.kubernetes.io/control-plane": "", "zone": "rack"}},
+			Spec:       corev1.NodeSpec{Taints: []corev1.Taint{{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule}}},
+			Status:     corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}},
+		},
+	)
+	c := &Cluster{K: k, Now: time.Now}
+	out, err := c.Spec(ctx, "a", "deployment", "billing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"image busybox:1.37.0", "runs: sh -c run", "LOG_LEVEL=debug", "DB_PASSWORD=(set, hidden)",
+		"LEDGER_TOKEN from secret ledger key token", "nodeSelector: disktype=nvme", "tolerations: possum.dev/asleep Exists  NoSchedule",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("spec lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "hunter2") {
+		t.Error("spec shows a secret-looking value")
+	}
+	nodes, _ := c.Nodes(ctx)
+	if want := "pi-1 Ready labels: kubernetes.io/arch=arm64 node-role.kubernetes.io/control-plane= zone=rack taints: node-role.kubernetes.io/control-plane:NoSchedule\n"; nodes != want {
+		t.Errorf("nodes = %q, want %q", nodes, want)
+	}
+}

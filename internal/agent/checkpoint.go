@@ -47,7 +47,7 @@ type Choice struct {
 // Choices are an investigation's.
 var Choices = []Choice{
 	{"fix", "you know the cause and can fix it with your tools: say the exact change in look_at", true},
-	{"look", "one specific check would settle it: say exactly what in look_at", true},
+	{"look", "one specific check with one of your tools would settle it: say which tool and what in look_at. If no tool can show it, escalate", true},
 	{"escalate", "the fix needs something you can't do (config, code, a secret, hardware), or you're out of ideas", false},
 }
 
