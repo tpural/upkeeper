@@ -152,12 +152,9 @@ func TestIncidents(t *testing.T) {
 	model := &replies{}
 	awake := false
 	r, now := newRunner(t, f, model, &awake)
-	f.invs = []tremolo.Investigation{
-		{ID: 1, Kind: "gap", Title: "no traces", Status: "open", Opened: now.Add(-time.Hour)},
-		{ID: 2, Kind: "incident", Title: "gridtie down", Status: "open", Opened: *now},
-	}
+	f.invs = []tremolo.Investigation{{ID: 2, Kind: "incident", Title: "gridtie down", Status: "open", Opened: *now}}
 
-	// Asleep: the new incident waits out the wake delay, and the gap waits for the GPU.
+	// Asleep: the new incident waits out the wake delay.
 	r.Tick(ctx)
 	if got := f.took(); got != "" {
 		t.Errorf("worked while waiting: %s", got)
@@ -173,15 +170,16 @@ func TestIncidents(t *testing.T) {
 		t.Errorf("wakes = %d", r.Status().WakesToday)
 	}
 
-	// The day's one wake is used: the next incident is escalated without the model.
+	// With a cap of one wake a day, it's used: the next incident is escalated without the model.
 	f.invs = append(f.invs, tremolo.Investigation{ID: 3, Kind: "incident", Title: "disk", Status: "open", Opened: now.Add(-time.Hour)})
 	r.Tick(ctx)
 	if got := f.took(); !strings.Contains(got, "escalate 3 upkeeper has woken the GPU 1 times today") {
 		t.Errorf("did %q", got)
 	}
 
-	// Awake, the gap is worked; a model that gets stuck on it is closed, not escalated: nothing is firing.
+	// A gap; a model that gets stuck on it is closed, not escalated: nothing is firing.
 	awake = true
+	f.invs = append(f.invs, tremolo.Investigation{ID: 1, Kind: "gap", Title: "no traces", Status: "open", Opened: now.Add(-time.Hour)})
 	*model = replies{call("pods", `{}`), call("pods", `{}`), call("pods", `{}`)}
 	r.Tick(ctx)
 	if got := f.took(); !strings.Contains(got, "close 1 abandoned ") {
@@ -306,5 +304,24 @@ func TestActions(t *testing.T) {
 	// No why, no action.
 	if _, err := restart.Run(context.Background(), map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie"}); err == nil {
 		t.Error("restarted without a why")
+	}
+}
+
+// TestWakesFreely checks that, without a cap, any investigation wakes the GPU.
+func TestWakesFreely(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeTremolo{}
+	model := &replies{}
+	awake := false
+	r, now := newRunner(t, f, model, &awake)
+	r.Config.GPU.MaxWakesPerDay = 0
+	finish := call("finish", `{"status":"abandoned","summary":"fine"}`)
+	for i := range 8 {
+		f.invs = append(f.invs, tremolo.Investigation{ID: int64(i + 1), Kind: "gap", Title: "gap", Status: "open", Opened: now.Add(-time.Hour)})
+		*model = replies{finish}
+		r.Tick(ctx)
+	}
+	if got := strings.Count(f.took(), "close"); got != 8 || r.Status().WakesToday != 8 {
+		t.Errorf("closed %d, woke %d times; want 8 and 8", got, r.Status().WakesToday)
 	}
 }

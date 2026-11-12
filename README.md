@@ -26,8 +26,8 @@ The model runs on a GPU node that sleeps when idle. upkeeper only uses the model
 
 - an incident waits `gpu.wakeDelay` (3m) before it wakes the GPU, and is closed untouched if its alert resolves
   first;
-- at most `gpu.maxWakesPerDay` (6) wakes; past that, incidents are escalated instead;
-- other investigations (gaps, tuning, runbook reviews) are only worked while the GPU is already awake.
+- other investigations (gaps, tuning, runbook reviews) wake it at once;
+- `gpu.maxWakesPerDay` caps wakes if you want one (by default there's none); past it, incidents are escalated.
 
 It's awake when `gpu.deployment` has a ready replica; reading that doesn't wake it.
 
@@ -53,7 +53,6 @@ model:
 gpu:
   deployment: llama-swap/llama-swap
   wakeDelay: 3m
-  maxWakesPerDay: 6
 patrol:
   every: 1h
   at: "07:30"
