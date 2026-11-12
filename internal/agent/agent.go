@@ -207,7 +207,8 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 		if t.Search != nil && !searched {
 			offer = append(slices.Clone(choices), SearchChoice)
 		}
-		c, err := a.checkpoint(ctx, tracer, msgs, offer, why, &res)
+		names := slices.Sorted(maps.Keys(byName))
+		c, err := a.checkpoint(ctx, tracer, msgs, offer, names, why, &res)
 		var stuck errNoDecision
 		if errors.As(err, &stuck) {
 			res.Stopped = stuck.Error()
@@ -236,7 +237,7 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			msgs = append(msgs, llm.Message{Role: "user", Content: refs})
 			continue
 		}
-		if continues(offer, c.Next) && unreachable(c, slices.Collect(maps.Keys(byName))) {
+		if continues(offer, c.Next) && unreachable(c, names) {
 			// It wants to do something none of its tools can: a person can.
 			res.Notes = append(res.Notes, "It wanted to "+strings.TrimSuffix(c.LookAt, ".")+", which none of its tools can do.")
 			c.Next = "escalate"

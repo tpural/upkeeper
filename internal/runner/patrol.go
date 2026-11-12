@@ -60,7 +60,7 @@ func (r *Runner) patrol(ctx context.Context) {
 	r.lastPatrol = r.Now()
 	ctx, span := r.start(ctx, "patrol", attribute.String("tremolo.task", "patrol"))
 	defer span.End()
-	tools, done, err := r.Toolbox(ctx, nil)
+	tools, done, err := r.Toolbox(ctx, nil, nil)
 	if err != nil {
 		r.fail("getting patrol tools", err)
 		return

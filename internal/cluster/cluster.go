@@ -629,3 +629,96 @@ func (c *Cluster) Nodes(ctx context.Context) (string, error) {
 	}
 	return b.String(), nil
 }
+
+// Hopeless says why replacing the pods of a workload, or one pod, can't fix
+// them: their image or config is wrong, they're killed for memory by their
+// own limit, or they can't be scheduled. A new pod would have the same
+// problem. It's empty when a fresh pod may help, e.g. a wedged process.
+func (c *Cluster) Hopeless(ctx context.Context, ns, kind, name string) (string, error) {
+	var pods []corev1.Pod
+	if kind == "pod" {
+		p, err := c.K.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		pods = []corev1.Pod{*p}
+	} else {
+		var sel *metav1.LabelSelector
+		switch kind {
+		case "deployment":
+			d, err := c.K.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				return "", err
+			}
+			sel = d.Spec.Selector
+		case "statefulset":
+			s, err := c.K.AppsV1().StatefulSets(ns).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				return "", err
+			}
+			sel = s.Spec.Selector
+		case "daemonset":
+			d, err := c.K.AppsV1().DaemonSets(ns).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				return "", err
+			}
+			sel = d.Spec.Selector
+		default:
+			return "", fmt.Errorf("kind must be deployment, statefulset or daemonset")
+		}
+		s, err := metav1.LabelSelectorAsSelector(sel)
+		if err != nil {
+			return "", err
+		}
+		list, err := c.K.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: s.String()})
+		if err != nil {
+			return "", err
+		}
+		pods = list.Items
+	}
+	var why []string
+	for i := range pods {
+		w := hopeless(&pods[i])
+		if w == "" && !ready(&pods[i]) {
+			return "", nil // a pod that's failing for a reason a fresh one may not have
+		}
+		if w != "" {
+			why = append(why, pods[i].Name+": "+w)
+		}
+	}
+	if len(why) == 0 {
+		return "", nil
+	}
+	return strings.Join(why, "; "), nil
+}
+
+var configReasons = []string{"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull", "CreateContainerConfigError", "CreateContainerError"}
+
+func hopeless(p *corev1.Pod) string {
+	for _, cd := range p.Status.Conditions {
+		if cd.Type == corev1.PodScheduled && cd.Status == corev1.ConditionFalse {
+			return "it can't be scheduled (" + clip(cd.Message, 160) + "), and a new pod can't either"
+		}
+	}
+	for _, s := range p.Status.ContainerStatuses {
+		if w := s.State.Waiting; w != nil && slices.Contains(configReasons, w.Reason) {
+			return fmt.Sprintf("%s is %s (%s): its image or config is wrong, and a new pod gets the same", s.Name, w.Reason, clip(w.Message, 160))
+		}
+		if t := s.LastTerminationState.Terminated; t != nil && t.Reason == "OOMKilled" {
+			return s.Name + " is OOMKilled by its own memory limit, which a new pod has too"
+		}
+		if t := s.LastTerminationState.Terminated; t != nil && strings.Contains(t.Message, "exec format error") {
+			return s.Name + "'s image is built for another CPU architecture"
+		}
+	}
+	return ""
+}
+
+func ready(p *corev1.Pod) bool {
+	for _, cd := range p.Status.Conditions {
+		if cd.Type == corev1.PodReady {
+			return cd.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}

@@ -117,3 +117,35 @@ func TestEventMessages(t *testing.T) {
 		t.Errorf("events:\n%s\nwant:\n%s", out, want)
 	}
 }
+
+func TestHopeless(t *testing.T) {
+	ctx := context.Background()
+	pod := func(name string, st corev1.ContainerStatus, ready bool) *corev1.Pod {
+		r := corev1.ConditionFalse
+		if ready {
+			r = corev1.ConditionTrue
+		}
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "a", Labels: map[string]string{"app": name[:3]}},
+			Status:     corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: r}}, ContainerStatuses: []corev1.ContainerStatus{st}},
+		}
+	}
+	dep := func(app string) *appsv1.Deployment {
+		return &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: app, Namespace: "a"}, Spec: appsv1.DeploymentSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": app}}}}
+	}
+	c := &Cluster{K: fake.NewClientset(
+		dep("tag"), pod("tag-1", corev1.ContainerStatus{Name: "c", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff", Message: "Back-off pulling"}}}, false),
+		dep("oom"), pod("oom-1", corev1.ContainerStatus{Name: "c", LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled"}}}, false),
+		dep("wed"), pod("wed-1", corev1.ContainerStatus{Name: "c", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}, false),
+		pod("wed-2", corev1.ContainerStatus{Name: "c", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}, true),
+	), Now: time.Now}
+	for name, want := range map[string]string{"tag": "c is ImagePullBackOff", "oom": "OOMKilled by its own memory limit", "wed": ""} {
+		why, err := c.Hopeless(ctx, "a", "deployment", name)
+		if err != nil || want == "" && why != "" || want != "" && !strings.Contains(why, want) {
+			t.Errorf("%s: %q, %v", name, why, err)
+		}
+	}
+	if why, _ := c.Hopeless(ctx, "a", "pod", "wed-1"); why != "" {
+		t.Errorf("a wedged pod is hopeless: %q", why)
+	}
+}

@@ -42,7 +42,8 @@ type Tremolo interface {
 
 // Toolbox gives the model its tools for an investigation, or for a patrol when
 // inv is nil. done is called when the run ends.
-type Toolbox func(ctx context.Context, inv *tremolo.Investigation) (tools []agent.Tool, done func(), err error)
+// Changes made with its tools go in log.
+type Toolbox func(ctx context.Context, inv *tremolo.Investigation, log *actionLog) (tools []agent.Tool, done func(), err error)
 
 // Runner is upkeeper's main loop.
 type Runner struct {
@@ -289,7 +290,8 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 		log.Info("waking the GPU")
 		r.Metrics.Wakes.Inc()
 	}
-	tools, done, err := r.Toolbox(ctx, &full)
+	actions := &actionLog{}
+	tools, done, err := r.Toolbox(ctx, &full, actions)
 	if err != nil {
 		r.fail("getting tools", err)
 		return
@@ -326,7 +328,7 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 	if ctx.Err() != nil {
 		return // shutting down; the claim expires and someone else takes it
 	}
-	outcome = r.finish(ctx, full, res, findings, refs, err)
+	outcome = r.finish(ctx, full, res, findings, refs, actions, err)
 	span.SetAttributes(attribute.Int("upkeeper.steps", res.Steps), attribute.Int("gen_ai.usage.total_tokens", res.Tokens))
 	if res.Stopped != "" {
 		decided(span, "stopped the model", res.Stopped)
@@ -337,11 +339,28 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 }
 
 // finish closes or escalates the investigation from how the run ended.
-func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agent.Result, findings []string, refs []ref, err error) string {
+func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agent.Result, findings []string, refs []ref, actions *actionLog, err error) string {
+	// Whatever the model says, a person learns what upkeeper changed and what
+	// tremolo wouldn't let it do.
+	escalate := func(why string) {
+		if len(actions.changed) > 0 {
+			why += " upkeeper changed: " + strings.Join(actions.changed, "; ") + "."
+		}
+		if len(actions.refused) > 0 {
+			why += " tremolo refused: " + strings.Join(actions.refused, "; ") + "."
+		}
+		r.escalate(ctx, inv.ID, why)
+	}
 	switch {
 	case err != nil:
-		r.escalate(ctx, inv.ID, "upkeeper couldn't work this: "+err.Error())
+		escalate("upkeeper couldn't work this: " + err.Error())
 		return "error"
+	case res.Ended == "finish" && len(actions.refused) > 0 && !strings.Contains(res.Answer, `"status":"fixed"`):
+		// A fix tremolo refused isn't nothing to do: a person makes it.
+		var f struct{ Summary string }
+		_ = json.Unmarshal([]byte(res.Answer), &f)
+		escalate("upkeeper found what to do but wasn't allowed to. " + f.Summary)
+		return "escalated"
 	case res.Ended == "finish":
 		var f struct {
 			Status, Summary, Fix, Runbook string
@@ -370,12 +389,12 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 		if len(e.Sources) > 0 {
 			why += " Sources: " + citedURLs(e.Sources, refs)
 		}
-		r.escalate(ctx, inv.ID, why)
+		escalate(why)
 		r.keepSources(ctx, inv, e.Sources, refs, "", "escalated", e.Why)
 		return "escalated"
 	case res.Decided != "" && res.Checkpoint != nil:
 		// It stepped back and decided a person should take this.
-		r.escalate(ctx, inv.ID, strings.Join(append([]string{"upkeeper stepped back and decided to hand this over. " + res.Checkpoint.Summary()}, res.Notes...), " "))
+		escalate(strings.Join(append([]string{"upkeeper stepped back and decided to hand this over. " + res.Checkpoint.Summary()}, res.Notes...), " "))
 		return "escalated"
 	}
 	why := "upkeeper stopped without deciding (" + res.Stopped + ")."
@@ -393,7 +412,7 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 		r.close(ctx, inv.ID, "abandoned", clip(why, 2000), "", "")
 		return "stopped"
 	}
-	r.escalate(ctx, inv.ID, why)
+	escalate(why)
 	return "stopped"
 }
 
