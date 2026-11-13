@@ -56,6 +56,24 @@ A reference it cites when it finishes or escalates goes into the runbook's `## S
 `came back`), re-reads the page, and says in the brief whether it still says the same. A page that changed or
 went away is flagged with a runbook review, not rewritten.
 
+## Evals
+
+`go run ./cmd/eval` rehearses problems with known right answers, from
+`eval/scenarios`, and scores how upkeeper handles them. Each run sets a scenario
+up in its own `eval-` namespace, breaks it, and opens a rehearsal investigation
+in tremolo for the running upkeeper. Rehearsals never notify anyone and are left
+out of reports. Patrols skip `eval-` namespaces, and tremolo's `ignoreNamespaces:
+["eval-*"]` keeps real alerts from firing for them. A run passes when the outcome,
+the changes made, the health afterwards and what upkeeper said match the
+scenario's `expect`.
+
+```sh
+TREMOLO_URL=https://tremolo.example TREMOLO_TOKEN=... go run ./cmd/eval -runs 5 -label baseline
+```
+
+The model samples, so one run per scenario is noise: compare pass rates over several
+runs, with `-label` naming what changed. Results go to `eval/results/<time>/`.
+
 ## Configuration
 
 ```yaml

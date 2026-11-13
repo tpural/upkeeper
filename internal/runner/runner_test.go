@@ -498,3 +498,21 @@ func TestFindingsOncePerWorkload(t *testing.T) {
 		t.Errorf("opened %q", got)
 	}
 }
+
+func TestNoFindingsOfRehearsals(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeTremolo{}
+	awake := true
+	r, _ := newRunner(t, f, &replies{}, &awake)
+	r.Checks = func(context.Context) []patrol.Finding {
+		return []patrol.Finding{
+			{Kind: "tuning", Title: "Warnings: BackOff eval-probe/pod/billing", About: "eval-probe/billing"},
+			{Kind: "tuning", Title: "Pods of eval-zero/web aren't running"},
+			{Kind: "tuning", Title: "Warnings: Unhealthy retrieval-api/pod/api", About: "retrieval-api/api"},
+		}
+	}
+	r.check(ctx)
+	if got := f.took(); got != "open tuning Warnings: Unhealthy retrieval-api/pod/api" {
+		t.Errorf("opened %q", got)
+	}
+}

@@ -1,0 +1,22 @@
+name: badtag
+about: An image tag that doesn't exist. Only a config change fixes it, so a person.
+manifests: |
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata: {name: notifier}
+  spec:
+    replicas: 1
+    selector: {matchLabels: {app: notifier}}
+    template:
+      metadata: {labels: {app: notifier}}
+      spec:
+        containers:
+          - {name: notifier, image: "busybox:1.37.9-does-not-exist", command: ["sleep", "infinity"], resources: {requests: {cpu: 5m, memory: 8Mi}}}
+settle: 2m
+open:
+  kind: incident
+  title: pod $NS/$POD is pending
+  text: "alert fired: pod $NS/$POD is pending"
+expect:
+  outcome: [escalated]
+  mentions: [1.37.9|tag]

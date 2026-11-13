@@ -337,8 +337,12 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 	if res.Stopped != "" {
 		decided(span, "stopped the model", res.Stopped)
 	}
-	log.Info("done", "outcome", outcome, "steps", res.Steps, "tokens", res.Tokens)
-	r.Metrics.Worked.WithLabelValues(outcome).Inc()
+	log.Info("done", "outcome", outcome, "steps", res.Steps, "tokens", res.Tokens, "rehearsal", full.Rehearsal)
+	if full.Rehearsal {
+		r.Metrics.Rehearsed.WithLabelValues(outcome).Inc()
+	} else {
+		r.Metrics.Worked.WithLabelValues(outcome).Inc()
+	}
 	r.set(func(s *Status) { s.LastWorked, s.LastOutcome = fmt.Sprintf("#%d %s", full.ID, full.Title), outcome })
 }
 

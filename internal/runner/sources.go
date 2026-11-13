@@ -247,6 +247,9 @@ func (r *Runner) private(ctx context.Context) []string {
 // keepSources writes the pages a run cited into the runbook it used, the
 // rule's, or a new one for the rule.
 func (r *Runner) keepSources(ctx context.Context, inv tremolo.Investigation, cited []int, refs []ref, runbook, outcome, what string) {
+	if inv.Rehearsal {
+		return // a made-up problem confirms nothing
+	}
 	var add []source
 	for _, n := range cited {
 		if n >= 1 && n <= len(refs) {

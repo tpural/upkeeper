@@ -1,0 +1,26 @@
+name: cpu
+about: Batches are slow because a 50m CPU limit throttles the container; only metrics show why. Raising the limit is config, so a person.
+manifests: |
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata: {name: encoder}
+  spec:
+    replicas: 1
+    selector: {matchLabels: {app: encoder}}
+    template:
+      metadata: {labels: {app: encoder}}
+      spec:
+        containers:
+          - name: encoder
+            image: busybox:1.37.0
+            command: ["sh", "-c", "echo 'encoder: started'; while true; do s=$(date +%s); i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done; echo \"encoded batch in $(( $(date +%s) - s ))s (target 2s)\"; done"]
+            resources: {requests: {cpu: 10m, memory: 8Mi}, limits: {cpu: 50m}}
+ready: [kubectl -n $NS rollout status deploy/encoder --timeout=3m]
+settle: 6m
+open:
+  kind: tuning
+  title: $NS/encoder is slow
+  text: Deployment $NS/encoder logs batches taking far longer than its 2s target.
+expect:
+  outcome: [escalated]
+  mentions: [throttl|cpu limit|50m]
