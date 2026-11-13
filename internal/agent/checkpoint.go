@@ -114,6 +114,7 @@ func (a *Agent) checkpoint(ctx context.Context, tracer trace.Tracer, msgs []llm.
 		attribute.Bool("upkeeper.checkpoint", true),
 		attribute.String("upkeeper.checkpoint.why", why),
 		attribute.Int("upkeeper.step", res.Steps+1),
+		attribute.Float64("gen_ai.request.temperature", llm.Temperature(ctx)),
 	))
 	defer span.End()
 	ask := append(append([]llm.Message(nil), msgs...), llm.Message{Role: "user", Content: checkpointPrompt(choices, why, tools)})

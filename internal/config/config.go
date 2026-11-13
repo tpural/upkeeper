@@ -42,6 +42,9 @@ type Model struct {
 	Name     string   `json:"name"`
 	MaxSteps int      `json:"maxSteps,omitempty"`
 	Timeout  Duration `json:"timeout,omitempty"`
+	// Temperatures are sampled at before the first checkpoint, after it, and
+	// after the second; checkpoints use the last.
+	Temperatures []float64 `json:"temperatures,omitempty"`
 }
 
 // GPU is what runs the model, and how often upkeeper may wake it.
@@ -127,6 +130,9 @@ func Parse(b []byte) (Config, error) {
 	}
 	if c.Model.MaxSteps == 0 {
 		c.Model.MaxSteps = 30
+	}
+	if c.Model.Temperatures == nil {
+		c.Model.Temperatures = []float64{0.7, 0.45, 0.2}
 	}
 	if c.Patrol.Timezone == "" {
 		c.Patrol.Timezone = "Local"

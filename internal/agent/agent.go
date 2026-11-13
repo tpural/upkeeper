@@ -96,8 +96,13 @@ type Agent struct {
 	Budget int
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
+	// Temperatures are what the model samples at before its first checkpoint,
+	// after it, and after the second: exploring early, committing later.
+	// Checkpoints use the last. Nil leaves the model's default.
+	Temperatures []float64
 
 	lastAt map[string]time.Time
+	banned map[string]int
 }
 
 // Fresh is how long after a call the same call isn't a repeat.
@@ -112,6 +117,7 @@ func (a *Agent) now() time.Time {
 
 // When the model is stepped back, and when it's stopped.
 const (
+	banFor      = 2 // steps a tool it's going round in circles with is taken away
 	emptyCheck  = 4 // tool answers in a row that found nothing
 	emptyStop   = 9
 	maxChecks   = 2
@@ -141,6 +147,7 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 	var res Result
 	seen := map[string]int{} // exact calls
 	a.lastAt = map[string]time.Time{}
+	a.banned = map[string]int{}
 	nothing := map[string]int{} // near-same calls that found nothing
 	idle, empty, checks := 0, 0, 0
 	searched := false
@@ -152,7 +159,12 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			return res, nil
 		}
 		a.trim(msgs)
-		m, err := a.chat(ctx, tracer, msgs, tools, &res)
+		m, err := a.chat(a.temper(ctx, checks), tracer, msgs, a.allowed(tools), &res)
+		for name := range a.banned {
+			if a.banned[name]--; a.banned[name] <= 0 {
+				delete(a.banned, name)
+			}
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				res.Stopped = "ran out of time"
@@ -205,8 +217,10 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			switch {
 			case seen[key(call)] >= repeatCheck:
 				why = "you repeated a call you'd already made"
+				a.ban(byName, name)
 			case nothing[near(call)] >= repeatCheck:
 				why = fmt.Sprintf("%s keeps finding nothing with small changes", name)
+				a.ban(byName, name)
 			}
 		}
 		switch {
@@ -232,7 +246,7 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			offer = append(slices.Clone(choices), SearchChoice)
 		}
 		names := slices.Sorted(maps.Keys(byName))
-		c, err := a.checkpoint(ctx, tracer, msgs, offer, names, why, &res)
+		c, err := a.checkpoint(a.temper(ctx, maxChecks), tracer, msgs, offer, names, why, &res)
 		var stuck errNoDecision
 		if errors.As(err, &stuck) {
 			res.Stopped = stuck.Error()
@@ -272,6 +286,7 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			return res, nil
 		}
 		// The model committed to a move: hold it to that, and start counting afresh.
+		delete(a.banned, strings.TrimSpace(c.Tool))
 		empty, idle = 0, 0
 		clear(nothing)
 		msgs = append(msgs, llm.Message{Role: "user", Content: fmt.Sprintf(
@@ -282,6 +297,30 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 	return res, nil
 }
 
+// temper is ctx sampling at the temperature for after the given checkpoints.
+func (a *Agent) temper(ctx context.Context, checks int) context.Context {
+	if len(a.Temperatures) == 0 {
+		return ctx
+	}
+	return llm.WithTemperature(ctx, a.Temperatures[min(checks, len(a.Temperatures)-1)])
+}
+
+// ban takes a tool away for a few steps: a small model that's going round in
+// circles keeps choosing it however it's told, and can't if it isn't offered.
+func (a *Agent) ban(tools map[string]Tool, name string) {
+	if tl, ok := tools[name]; ok && !tl.Ends {
+		a.banned[name] = banFor
+	}
+}
+
+// allowed are the tools that aren't banned.
+func (a *Agent) allowed(tools []llm.Tool) []llm.Tool {
+	if len(a.banned) == 0 {
+		return tools
+	}
+	return slices.DeleteFunc(slices.Clone(tools), func(t llm.Tool) bool { return a.banned[t.Name] > 0 })
+}
+
 // chat is one model call, as a span with what it was asked and what it said.
 func (a *Agent) chat(ctx context.Context, tracer trace.Tracer, msgs []llm.Message, tools []llm.Tool, res *Result) (llm.Message, error) {
 	ctx, span := tracer.Start(ctx, "chat "+a.ModelName, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(
@@ -289,6 +328,8 @@ func (a *Agent) chat(ctx context.Context, tracer trace.Tracer, msgs []llm.Messag
 		attribute.String("gen_ai.request.model", a.ModelName),
 		attribute.Int("upkeeper.step", res.Steps+1),
 		attribute.Int("upkeeper.messages", len(msgs)),
+		attribute.Float64("gen_ai.request.temperature", llm.Temperature(ctx)),
+		attribute.Int("upkeeper.tools", len(tools)),
 	))
 	defer span.End()
 	// The newest input: what the model is answering this step.
@@ -339,6 +380,9 @@ func (a *Agent) run(ctx context.Context, tools map[string]Tool, call llm.ToolCal
 	if !ok {
 		return fmt.Sprintf("There's no tool %q. Use one of the tools you were given.", call.Function.Name), false, nil
 	}
+	if a.banned[tl.Name] > 0 {
+		return fmt.Sprintf(unavailable, tl.Name), false, nil
+	}
 	var in map[string]any
 	if s := strings.TrimSpace(call.Function.Arguments); s != "" && s != "null" {
 		if err := json.Unmarshal([]byte(s), &in); err != nil {
@@ -367,11 +411,13 @@ func (a *Agent) run(ctx context.Context, tools map[string]Tool, call llm.ToolCal
 	return out, tl.Ends, nil
 }
 
+const unavailable = "There's no %s for the next steps: you were going round in circles with it. Use another tool, or finish or escalate."
+
 const repeated = "You already made this exact call; its answer is above. Try something different, or end the task."
 
 // found reports whether a tool's answer had anything in it.
 func found(answer string) bool {
-	for _, p := range []string{"No ", "Failed: ", repeated, "There's no tool", "Your arguments"} {
+	for _, p := range []string{"No ", "Failed: ", repeated, "There's no ", "Your arguments"} {
 		if strings.HasPrefix(answer, p) {
 			return false
 		}

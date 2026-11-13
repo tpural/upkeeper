@@ -58,6 +58,21 @@ func New(url, model string) *Client {
 	return &Client{URL: strings.TrimRight(url, "/"), Model: model, HTTP: &http.Client{}}
 }
 
+type temperatureKey struct{}
+
+// WithTemperature has requests made with ctx sample at t.
+func WithTemperature(ctx context.Context, t float64) context.Context {
+	return context.WithValue(ctx, temperatureKey{}, t)
+}
+
+// Temperature is what requests made with ctx sample at: 0.2 unless set.
+func Temperature(ctx context.Context) float64 {
+	if t, ok := ctx.Value(temperatureKey{}).(float64); ok {
+		return t
+	}
+	return 0.2
+}
+
 // Chat sends the conversation and returns the model's reply.
 func (c *Client) Chat(ctx context.Context, msgs []Message, tools []Tool) (Message, Usage, error) {
 	return c.chat(ctx, msgs, tools, nil)
@@ -78,7 +93,7 @@ func (c *Client) chat(ctx context.Context, msgs []Message, tools []Tool, schema 
 		Type     string   `json:"type"`
 		Function function `json:"function"`
 	}
-	body := map[string]any{"model": c.Model, "messages": msgs, "temperature": 0.2}
+	body := map[string]any{"model": c.Model, "messages": msgs, "temperature": Temperature(ctx)}
 	if schema != nil {
 		body["response_format"] = map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "answer", "schema": schema}}
 	}
