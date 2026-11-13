@@ -113,10 +113,10 @@ func main() {
 	if *out == "" {
 		*out = filepath.Join("eval", "results", time.Now().Format("2006-01-02T15-04"))
 	}
-	if err := os.MkdirAll(*out, 0o755); err != nil {
+	if err := os.MkdirAll(*out, 0o750); err != nil {
 		fail(err)
 	}
-	f, err := os.OpenFile(filepath.Join(*out, "results.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(filepath.Join(*out, "results.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		fail(err)
 	}
@@ -146,7 +146,7 @@ func main() {
 	}
 	summary := summarize(results, *label)
 	fmt.Print("\n" + summary)
-	_ = os.WriteFile(filepath.Join(*out, "summary.md"), []byte(summary), 0o644)
+	_ = os.WriteFile(filepath.Join(*out, "summary.md"), []byte(summary), 0o600)
 }
 
 func fail(err error) {
@@ -216,7 +216,7 @@ func (e *evaluator) run(ctx context.Context, s Scenario, n int) Result {
 	if err := sh(ctx, env, "kubectl delete namespace "+ns+" --ignore-not-found --wait --timeout=3m && kubectl create namespace "+ns); err != nil {
 		return broke("namespace", err)
 	}
-	apply := exec.CommandContext(ctx, "kubectl", "-n", ns, "apply", "-f", "-")
+	apply := exec.CommandContext(ctx, "kubectl", "-n", ns, "apply", "-f", "-") //nolint:gosec // the namespace is eval-<scenario name>
 	apply.Stdin = strings.NewReader(s.Manifests)
 	if b, err := apply.CombinedOutput(); err != nil {
 		return broke("apply", fmt.Errorf("%v: %s", err, b))
@@ -404,7 +404,7 @@ func (e *evaluator) spans(ctx context.Context, query string) ([]map[string]strin
 }
 
 func sh(ctx context.Context, env []string, command string) error {
-	c := exec.CommandContext(ctx, "sh", "-c", command)
+	c := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // scenarios are shell commands by design
 	c.Env = env
 	if b, err := c.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s: %v: %s", command, err, strings.TrimSpace(string(b)))
@@ -413,7 +413,7 @@ func sh(ctx context.Context, env []string, command string) error {
 }
 
 func output(ctx context.Context, name string, args ...string) (string, error) {
-	b, err := exec.CommandContext(ctx, name, args...).Output()
+	b, err := exec.CommandContext(ctx, name, args...).Output() //nolint:gosec // only called with kubectl
 	return strings.TrimSpace(string(b)), err
 }
 
