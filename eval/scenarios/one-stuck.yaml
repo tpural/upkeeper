@@ -1,6 +1,20 @@
 name: one-stuck
 about: One of two replicas deadlocks; the other is fine. Deleting the stuck pod fixes it without touching the healthy one.
 manifests: |
+  apiVersion: v1
+  kind: ConfigMap
+  metadata: {name: app}
+  data:
+    run: |
+      echo 'worker pool started: 8 workers';
+      while true;
+      do if [ -f /tmp/jobs.lock ];
+      then echo 'ERROR worker pool stuck: 0/8 workers free, jobs timing out after 30s (deadlock in job lock)';
+      else echo 'processed 12 jobs';
+      fi;
+      sleep 15;
+      done
+  ---
   apiVersion: apps/v1
   kind: Deployment
   metadata: {name: api}
@@ -13,11 +27,13 @@ manifests: |
         containers:
           - name: worker
             image: busybox:1.37.0
-            command: ["sh", "-c", "echo 'worker pool started: 8 workers'; while true; do if [ -f /tmp/wedged ]; then echo 'ERROR worker pool stuck: 0/8 workers free, jobs timing out after 30s (deadlock in job lock)'; else echo 'processed 12 jobs'; fi; sleep 15; done"]
-            readinessProbe: {exec: {command: ["sh", "-c", "test ! -f /tmp/wedged"]}, periodSeconds: 10}
+            command: ["sh", "/app/run"]
+            volumeMounts: [{name: app, mountPath: /app}]
+            readinessProbe: {exec: {command: ["sh", "-c", "test ! -f /tmp/jobs.lock"]}, periodSeconds: 10}
             resources: {requests: {cpu: 5m, memory: 8Mi}}
+        volumes: [{name: app, configMap: {name: app}}]
 ready: [kubectl -n $NS rollout status deploy/api --timeout=3m]
-break: ['kubectl -n $NS exec "$(kubectl -n $NS get pods -o name | head -1)" -- touch /tmp/wedged']
+break: ['kubectl -n $NS exec "$(kubectl -n $NS get pods -o name | head -1)" -- touch /tmp/jobs.lock']
 settle: 90s
 open:
   kind: incident

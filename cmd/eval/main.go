@@ -33,7 +33,7 @@ import (
 type Scenario struct {
 	Name  string `json:"name"`
 	About string `json:"about"`
-	// Manifests are applied in the scenario's namespace, eval-<name>.
+	// Manifests are applied in the run's namespace, eval-<name>-<id>.
 	Manifests string `json:"manifests"`
 	// Ready are shell commands that must succeed before breaking it; Break
 	// break it. Both see $NS.
@@ -204,7 +204,8 @@ type evaluator struct {
 // run sets s up, breaks it, has upkeeper work it, and scores what it did.
 func (e *evaluator) run(ctx context.Context, s Scenario, n int) Result {
 	r := Result{Scenario: s.Name, Run: n, Started: time.Now()}
-	ns := "eval-" + s.Name
+	// A namespace of its own: metrics and logs of earlier runs mustn't look like this one's past.
+	ns := fmt.Sprintf("eval-%s-%x", s.Name, time.Now().Unix()%0x10000)
 	env := append(os.Environ(), "NS="+ns)
 	defer func() {
 		_ = sh(context.WithoutCancel(ctx), env, "kubectl delete namespace "+ns+" --ignore-not-found --wait --timeout=3m")
@@ -216,7 +217,7 @@ func (e *evaluator) run(ctx context.Context, s Scenario, n int) Result {
 	if err := sh(ctx, env, "kubectl delete namespace "+ns+" --ignore-not-found --wait --timeout=3m && kubectl create namespace "+ns); err != nil {
 		return broke("namespace", err)
 	}
-	apply := exec.CommandContext(ctx, "kubectl", "-n", ns, "apply", "-f", "-") //nolint:gosec // the namespace is eval-<scenario name>
+	apply := exec.CommandContext(ctx, "kubectl", "-n", ns, "apply", "-f", "-") //nolint:gosec // the namespace is eval-<scenario name>-<id>
 	apply.Stdin = strings.NewReader(s.Manifests)
 	if b, err := apply.CombinedOutput(); err != nil {
 		return broke("apply", fmt.Errorf("%v: %s", err, b))

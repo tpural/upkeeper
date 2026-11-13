@@ -1,6 +1,20 @@
 name: mem
 about: Memory climbs steadily toward the container's 96Mi limit; only metrics show it. It needs a person (a higher limit or a fix), nothing to restart yet.
 manifests: |
+  apiVersion: v1
+  kind: ConfigMap
+  metadata: {name: app}
+  data:
+    run: |
+      echo 'cache: warming';
+      i=0;
+      while true;
+      do i=$((i+1));
+      head -c 1048576 /dev/urandom > /dev/shm/e$i;
+      [ $((i % 20)) -eq 0 ] && echo "cache entries: $i";
+      sleep 15;
+      done
+  ---
   apiVersion: apps/v1
   kind: Deployment
   metadata: {name: cache}
@@ -13,10 +27,10 @@ manifests: |
         containers:
           - name: cache
             image: busybox:1.37.0
-            command: ["sh", "-c", "echo 'cache: warming'; i=0; while true; do i=$((i+1)); head -c 1048576 /dev/urandom > /dev/shm/e$i; [ $((i % 20)) -eq 0 ] && echo \"cache entries: $i\"; sleep 15; done"]
+            command: ["sh", "/app/run"]
             resources: {requests: {cpu: 5m, memory: 16Mi}, limits: {memory: 96Mi}}
-            volumeMounts: [{name: shm, mountPath: /dev/shm}]
-        volumes: [{name: shm, emptyDir: {medium: Memory}}]
+            volumeMounts: [{name: app, mountPath: /app}, {name: shm, mountPath: /dev/shm}]
+        volumes: [{name: app, configMap: {name: app, defaultMode: 0755}}, {name: shm, emptyDir: {medium: Memory}}]
 ready: [kubectl -n $NS rollout status deploy/cache --timeout=3m]
 settle: 10m
 open:
