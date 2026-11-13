@@ -100,6 +100,9 @@ type Agent struct {
 	// after it, and after the second: exploring early, committing later.
 	// Checkpoints use the last. Nil leaves the model's default.
 	Temperatures []float64
+	// Plan holds changes back until the model has stepped back and decided to
+	// fix with that tool: it explores freely, but commits on purpose.
+	Plan bool
 
 	lastAt map[string]time.Time
 	banned map[string]int
@@ -118,6 +121,7 @@ func (a *Agent) now() time.Time {
 // When the model is stepped back, and when it's stopped.
 const (
 	banFor      = 2 // steps a tool it's going round in circles with is taken away
+	maxGates    = 2 // times it may be stopped short of a change to step back
 	emptyCheck  = 4 // tool answers in a row that found nothing
 	emptyStop   = 9
 	maxChecks   = 2
@@ -149,7 +153,8 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 	a.lastAt = map[string]time.Time{}
 	a.banned = map[string]int{}
 	nothing := map[string]int{} // near-same calls that found nothing
-	idle, empty, checks := 0, 0, 0
+	idle, empty, checks, gates := 0, 0, 0, 0
+	unlocked := map[string]bool{} // change tools a checkpoint decided to fix with
 	searched := false
 	warnAt := (t.MaxSteps*6 + 9) / 10
 	warned := false
@@ -159,7 +164,11 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			return res, nil
 		}
 		a.trim(msgs)
-		m, err := a.chat(a.temper(ctx, checks), tracer, msgs, a.allowed(tools), &res)
+		phase := checks
+		if len(unlocked) > 0 {
+			phase = maxChecks // acting: the most committed temperature
+		}
+		m, err := a.chat(a.temper(ctx, phase), tracer, msgs, a.allowed(tools), &res)
 		for name := range a.banned {
 			if a.banned[name]--; a.banned[name] <= 0 {
 				delete(a.banned, name)
@@ -180,8 +189,15 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 		} else {
 			idle = 0
 		}
+		gate := ""
 		for _, call := range m.ToolCalls {
 			name := call.Function.Name
+			if tl, ok := byName[name]; ok && a.Plan && tl.Changes && !unlocked[name] {
+				// Exploring: a change waits until it has stepped back and decided on it.
+				gate = fmt.Sprintf("you want to %s %s; before changing anything, decide", name, compactArgs(call))
+				msgs = append(msgs, llm.Message{Role: "tool", ToolCallID: call.ID, Content: "Not yet: step back and decide first. Nothing was changed."})
+				continue
+			}
 			answer, ended, err := a.call(ctx, tracer, byName, call, seen)
 			var fatal Fatal
 			if errors.As(err, &fatal) {
@@ -223,7 +239,16 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 				a.ban(byName, name)
 			}
 		}
+		if gate != "" {
+			if gates >= maxGates {
+				res.Stopped = "kept trying to make changes without deciding to"
+				return res, nil
+			}
+			gates++
+			why = gate
+		}
 		switch {
+		case gate != "":
 		case empty >= emptyStop:
 			res.Stopped = fmt.Sprintf("searched %d times in a row without finding anything", empty)
 			return res, nil
@@ -236,11 +261,13 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 		if why == "" {
 			continue
 		}
-		if checks >= maxChecks || idle >= 2 {
+		if gate == "" && (checks >= maxChecks || idle >= 2) {
 			res.Stopped = "kept going in circles after stepping back: " + why
 			return res, nil
 		}
-		checks++
+		if gate == "" {
+			checks++
+		}
 		offer := choices
 		if t.Search != nil && !searched {
 			offer = append(slices.Clone(choices), SearchChoice)
@@ -287,6 +314,9 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 		}
 		// The model committed to a move: hold it to that, and start counting afresh.
 		delete(a.banned, strings.TrimSpace(c.Tool))
+		if tl, ok := byName[strings.TrimSpace(c.Tool)]; ok && c.Next == "fix" && tl.Changes {
+			unlocked[tl.Name] = true
+		}
 		empty, idle = 0, 0
 		clear(nothing)
 		msgs = append(msgs, llm.Message{Role: "user", Content: fmt.Sprintf(
@@ -295,6 +325,11 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 	}
 	res.Stopped = fmt.Sprintf("used all %d steps", t.MaxSteps)
 	return res, nil
+}
+
+// compactArgs is a call's arguments for a sentence.
+func compactArgs(call llm.ToolCall) string {
+	return clip(strings.TrimSpace(call.Function.Arguments), 200)
 }
 
 // temper is ctx sampling at the temperature for after the given checkpoints.

@@ -96,7 +96,7 @@ func run() error {
 	r := &runner.Runner{
 		Config:  cfg,
 		T:       t,
-		Agent:   &agent.Agent{Model: llm.New(cfg.Model.URL, cfg.Model.Name), ModelName: cfg.Model.Name, Log: log, Tracer: tracer, Budget: 90_000, Temperatures: cfg.Model.Temperatures},
+		Agent:   &agent.Agent{Model: llm.New(cfg.Model.URL, cfg.Model.Name), ModelName: cfg.Model.Name, Log: log, Tracer: tracer, Budget: 90_000, Temperatures: cfg.Model.Temperatures, Plan: *cfg.Model.Plan},
 		Tracer:  tracer,
 		Toolbox: runner.NewToolbox(t, c, version),
 		Checks:  checks.Check,
