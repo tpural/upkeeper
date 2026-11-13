@@ -85,6 +85,7 @@ model:
   name: qwen3-coder-next
   maxSteps: 30
   timeout: 15m                 # per investigation
+  temperatures: [0.7, 0.45, 0.2] # before the 1st step back, after it, after the 2nd
 gpu:
   deployment: llama-swap/llama-swap
   wakeDelay: 3m

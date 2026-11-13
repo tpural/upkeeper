@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -261,5 +262,66 @@ func TestFresh(t *testing.T) {
 	res, _ := a.Run(context.Background(), Task{Tools: tools(&calls), MaxSteps: 10})
 	if res.Ended != "finish" || len(calls) != 2 {
 		t.Errorf("result %+v, pods ran %d times", res, len(calls))
+	}
+}
+
+// offered records the tools and temperature of each request.
+type offered struct {
+	script
+	tools [][]string
+	temps []float64
+}
+
+func (o *offered) Chat(ctx context.Context, msgs []llm.Message, ts []llm.Tool) (llm.Message, llm.Usage, error) {
+	names := []string{}
+	for _, t := range ts {
+		names = append(names, t.Name)
+	}
+	o.tools = append(o.tools, names)
+	o.temps = append(o.temps, llm.Temperature(ctx))
+	return o.script.Chat(ctx, msgs, ts)
+}
+
+func TestTemperatureAndBans(t *testing.T) {
+	empty := Tool{Name: "logs", Params: json.RawMessage(`{}`), Run: func(context.Context, map[string]any) (string, error) {
+		return "No logs match.", nil
+	}}
+	var calls []string
+	m := &offered{script: script{replies: []llm.Message{
+		call("logs", `{"query":"billing probe"}`),
+		call("logs", `{"query":"billing port"}`),
+		say(`{"known":"the probe checks 8080","tried":"logs","missing":"","next":"look","look_at":"pods in billing","tool":"pods"}`),
+		call("logs", `{"query":"billing again"}`),
+		call("pods", `{"namespace":"billing"}`),
+		call("finish", `{"fix":"nothing"}`),
+	}}}
+	a := &Agent{Model: m, Log: slog.New(slog.DiscardHandler), Temperatures: []float64{0.7, 0.45, 0.2}}
+	res, err := a.Run(context.Background(), Task{Tools: append(tools(&calls), empty), MaxSteps: 20})
+	if err != nil || res.Ended != "finish" || res.Steps != 6 {
+		t.Fatalf("result %+v, %v", res, err)
+	}
+	// It explores at 0.7, steps back at 0.2, then carries on at 0.45.
+	if want := []float64{0.7, 0.7, 0.2, 0.45, 0.45, 0.45}; !slices.Equal(m.temps, want) {
+		t.Errorf("temperatures %v, want %v", m.temps, want)
+	}
+	// The tool it went round in circles with is gone for two steps, then back.
+	all, without := "pods finish logs", "pods finish"
+	for i, want := range []string{all, all, "", without, without, all} {
+		if got := strings.Join(m.tools[i], " "); got != want {
+			t.Errorf("request %d offered %q, want %q", i+1, got, want)
+		}
+	}
+	// Calling it anyway doesn't run it.
+	if got := m.seen[4][len(m.seen[4])-1].Content; !strings.HasPrefix(got, "There's no logs for the next steps") {
+		t.Errorf("a banned call answered %q", got)
+	}
+}
+
+func TestDefaultTemperature(t *testing.T) {
+	var calls []string
+	m := &offered{script: script{replies: []llm.Message{call("finish", `{"fix":"nothing"}`)}}}
+	a := &Agent{Model: m, Log: slog.New(slog.DiscardHandler)}
+	if _, err := a.Run(context.Background(), Task{Tools: tools(&calls), MaxSteps: 5}); err != nil || !slices.Equal(m.temps, []float64{0.2}) {
+		t.Errorf("temperatures %v, %v", m.temps, err)
 	}
 }
