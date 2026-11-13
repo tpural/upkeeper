@@ -325,3 +325,63 @@ func TestDefaultTemperature(t *testing.T) {
 		t.Errorf("temperatures %v, %v", m.temps, err)
 	}
 }
+
+func TestPlanThenAct(t *testing.T) {
+	var changed []string
+	restart := Tool{Name: "restart", Changes: true, Params: json.RawMessage(`{}`), Run: func(_ context.Context, a map[string]any) (string, error) {
+		changed = append(changed, a["name"].(string))
+		return "Done.", nil
+	}}
+	var calls []string
+	fix := say(`{"known":"the worker pool is deadlocked","tried":"pods, logs","missing":"","next":"fix","look_at":"restart api","tool":"restart"}`)
+	m := &offered{script: script{replies: []llm.Message{
+		call("pods", `{"namespace":"a"}`),
+		call("restart", `{"name":"api"}`),
+		fix,
+		call("restart", `{"name":"api"}`),
+		call("finish", `{"fix":"restarted api"}`),
+	}}}
+	a := &Agent{Model: m, Log: slog.New(slog.DiscardHandler), Plan: true, Temperatures: []float64{0.7, 0.45, 0.2}}
+	res, err := a.Run(context.Background(), Task{Tools: append(tools(&calls), restart), MaxSteps: 20})
+	if err != nil || res.Ended != "finish" || res.Checkpoint == nil || res.Checkpoint.Next != "fix" {
+		t.Fatalf("result %+v, %v", res, err)
+	}
+	// The first restart waits for a decision; the one after it runs.
+	if !slices.Equal(changed, []string{"api"}) {
+		t.Errorf("changed %v", changed)
+	}
+	if got := m.seen[2][len(m.seen[2])-1].Content; !strings.Contains(got, `you want to restart {"name":"api"}`) {
+		t.Errorf("stepped back with %q", got)
+	}
+	// It explores hot, decides and acts cold.
+	if want := []float64{0.7, 0.7, 0.2, 0.2, 0.2}; !slices.Equal(m.temps, want) {
+		t.Errorf("temperatures %v, want %v", m.temps, want)
+	}
+
+	// Deciding to look doesn't unlock it, and it can't keep asking.
+	changed = nil
+	look := say(`{"known":"pods are wedged","tried":"pods","missing":"logs","next":"look","look_at":"pods in a","tool":"pods"}`)
+	m = &offered{script: script{replies: []llm.Message{
+		call("restart", `{"name":"api"}`), look,
+		call("restart", `{"name":"api"}`), look,
+		call("restart", `{"name":"api"}`),
+	}}}
+	a.Model = m
+	res, err = a.Run(context.Background(), Task{Tools: append(tools(&calls), restart), MaxSteps: 20})
+	if err != nil || len(changed) != 0 || res.Stopped != "kept trying to make changes without deciding to" {
+		t.Errorf("result %+v, %v, changed %v", res, err, changed)
+	}
+}
+
+func TestNoPlanChangesAtOnce(t *testing.T) {
+	var changed, calls []string
+	restart := Tool{Name: "restart", Changes: true, Params: json.RawMessage(`{}`), Run: func(context.Context, map[string]any) (string, error) {
+		changed = append(changed, "api")
+		return "Done.", nil
+	}}
+	m := &script{replies: []llm.Message{call("restart", `{}`), call("finish", `{"fix":"x"}`)}}
+	a := &Agent{Model: m, Log: slog.New(slog.DiscardHandler)}
+	if res, err := a.Run(context.Background(), Task{Tools: append(tools(&calls), restart), MaxSteps: 5}); err != nil || res.Ended != "finish" || len(changed) != 1 {
+		t.Errorf("result %+v, %v, changed %v", res, err, changed)
+	}
+}
