@@ -350,6 +350,10 @@ func (e *evaluator) trace(ctx context.Context, id int64) (traced, error) {
 	if root == nil {
 		return t, fmt.Errorf("no trace of upkeeper's run of #%d", id)
 	}
+	// The run's own spans are exported in batches, some after it ends.
+	if !sleep(ctx, 20*time.Second) {
+		return t, ctx.Err()
+	}
 	t.outcome = root["span_attr:tremolo.outcome"]
 	t.steps, _ = strconv.Atoi(root["span_attr:upkeeper.steps"])
 	t.tokens, _ = strconv.Atoi(root["span_attr:gen_ai.usage.total_tokens"])
@@ -376,7 +380,11 @@ func (e *evaluator) trace(ctx context.Context, id int64) (traced, error) {
 // spans runs LogsQL over the last day's spans in tremolo.
 func (e *evaluator) spans(ctx context.Context, query string) ([]map[string]string, error) {
 	now := time.Now()
-	q := url.Values{"query": {query}, "start": {strconv.FormatInt(now.Add(-24*time.Hour).Unix(), 10)}, "end": {strconv.FormatInt(now.Unix(), 10)}}
+	q := url.Values{
+		"query": {query}, "start": {strconv.FormatInt(now.Add(-24*time.Hour).Unix(), 10)}, "end": {strconv.FormatInt(now.Unix(), 10)},
+		// Spans from the last 30 seconds too: the run just ended.
+		"disable_latency_offset": {"true"},
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.T.URL.String()+"/api/traces/query?"+q.Encode(), nil)
 	if err != nil {
 		return nil, err
