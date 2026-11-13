@@ -172,3 +172,18 @@ func TestSettle(t *testing.T) {
 		t.Errorf("unsettled = %q", got)
 	}
 }
+
+func TestOldest(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 12, 3, 0, 0, 0, time.UTC)
+	pod := func(name string, at time.Time) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "a", CreationTimestamp: metav1.NewTime(at)}}
+	}
+	c := New(fake.NewClientset(pod("new", now.Add(-time.Minute)), pod("old", now.Add(-3*time.Hour)), pod("unset", time.Time{})))
+	if got, err := c.Oldest(ctx, "a"); err != nil || !got.Equal(now.Add(-3*time.Hour)) {
+		t.Errorf("oldest %v %v", got, err)
+	}
+	if got, err := c.Oldest(ctx, "empty"); err != nil || !got.IsZero() {
+		t.Errorf("empty namespace %v %v", got, err)
+	}
+}

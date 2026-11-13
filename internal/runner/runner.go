@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -63,6 +64,9 @@ type Runner struct {
 	Web *web.Client
 	// Nodes lists the cluster's node names, which a query mustn't carry.
 	Nodes func(ctx context.Context) ([]string, error)
+	// Oldest is when a namespace's oldest pod started (zero if unknown); nil
+	// means never known.
+	Oldest func(ctx context.Context, ns string) (time.Time, error)
 
 	checks sourceChecks
 
@@ -369,6 +373,12 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 		_ = json.Unmarshal([]byte(res.Answer), &f)
 		escalate("upkeeper found what to do but wasn't allowed to. " + f.Summary)
 		return "escalated"
+	case res.Ended == "finish" && len(actions.changed) == 0 && strings.Contains(res.Answer, `"status":"fixed"`):
+		// Nothing was changed, so upkeeper didn't fix it, whatever the model thinks.
+		var f struct{ Summary string }
+		_ = json.Unmarshal([]byte(res.Answer), &f)
+		escalate("upkeeper said this was fixed but made no change, so it isn't sure. " + f.Summary)
+		return "escalated"
 	case res.Ended == "finish":
 		var f struct {
 			Status, Summary, Fix, Runbook string
@@ -407,6 +417,11 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 		r.close(ctx, inv.ID, "fixed", "upkeeper's change worked: "+actions.settled+" The model didn't finish on its own ("+res.Stopped+").", fix, "")
 		return "fixed"
 	case res.Decided == agent.OverChoice.Name && res.Checkpoint != nil && len(actions.changed) == 0:
+		if young := r.young(ctx, inv); young != "" {
+			// It can't have been healthy for a day: it hasn't run that long.
+			escalate("upkeeper thought this had stopped over a day ago, but " + young + ". " + res.Checkpoint.Summary())
+			return "escalated"
+		}
 		r.close(ctx, inv.ID, "abandoned", clip("Not happening any more. "+res.Checkpoint.Summary(), 2000), "", "")
 		return "over"
 	case res.Decided != "" && res.Checkpoint != nil:
@@ -415,9 +430,18 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 		return "escalated"
 	}
 	why := "upkeeper stopped without deciding (" + res.Stopped + ")."
+	if c := res.Checkpoint; c != nil {
+		// It went in circles after stepping back, but what it knew then is a
+		// person's starting point: they get it if it's an incident, or if it
+		// said nothing was missing.
+		why = "upkeeper went in circles (" + res.Stopped + "), but when it stepped back it had found: " + c.Summary()
+		if missing := strings.Trim(strings.TrimSpace(c.Missing), "-."); inv.Kind == "incident" || missing == "" {
+			escalate(why)
+			return "escalated"
+		}
+	}
 	switch {
 	case res.Checkpoint != nil:
-		why += " When it last stepped back: " + res.Checkpoint.Summary()
 	case len(findings) > 0:
 		why += " What it found: " + strings.Join(findings, " ")
 	case len(res.Last) > 0:
@@ -431,6 +455,33 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 	}
 	escalate(why)
 	return "stopped"
+}
+
+// namespaced is the first ns/name in a title.
+var namespaced = regexp.MustCompile(`(^|[\s(])([a-z0-9]([-a-z0-9]*[a-z0-9])?)/[a-z0-9]`)
+
+// young says how long the investigation's workload has run, when that's under
+// a day; "" when it's older or upkeeper can't tell.
+func (r *Runner) young(ctx context.Context, inv tremolo.Investigation) string {
+	if r.Oldest == nil {
+		return ""
+	}
+	m := namespaced.FindStringSubmatch(inv.Title)
+	if m == nil {
+		return ""
+	}
+	oldest, err := r.Oldest(ctx, m[2])
+	if err != nil || oldest.IsZero() {
+		return ""
+	}
+	now := time.Now
+	if r.Now != nil {
+		now = r.Now
+	}
+	if d := now().Sub(oldest); d < 24*time.Hour {
+		return fmt.Sprintf("the pods in %s are only %s old", m[2], d.Round(time.Minute))
+	}
+	return ""
 }
 
 func (r *Runner) close(ctx context.Context, id int64, status, summary, fix, runbook string) {

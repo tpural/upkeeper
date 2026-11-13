@@ -179,9 +179,13 @@ func newRunner(t *testing.T, f *fakeTremolo, model *replies, awake *bool) (*Runn
 		Agent:   &agent.Agent{Model: model, Log: slog.New(slog.DiscardHandler)},
 		Metrics: NewMetrics(nil),
 		Awake:   func(context.Context) (bool, error) { return *awake, nil },
-		Toolbox: func(_ context.Context, inv *tremolo.Investigation, _ *actionLog) ([]agent.Tool, func(), error) {
+		Toolbox: func(_ context.Context, inv *tremolo.Investigation, log *actionLog) ([]agent.Tool, func(), error) {
 			tools := []agent.Tool{{Name: "pods", Params: schema(""), Run: func(context.Context, map[string]any) (string, error) { return "all good", nil }}}
 			if inv != nil {
+				tools = append(tools, agent.Tool{Name: "restart", Params: schema(""), Changes: true, Run: func(context.Context, map[string]any) (string, error) {
+					log.changed = append(log.changed, "restart")
+					return "Done.", nil
+				}})
 				tools = append(tools, agent.Tool{Name: "record", Params: schema(""), Run: func(context.Context, map[string]any) (string, error) { return "Recorded.", nil }})
 				tools = append(tools, ending()...)
 			}
@@ -206,7 +210,7 @@ func TestIncidents(t *testing.T) {
 	}
 	// Then it's worked, waking the GPU, and the fix closes it.
 	*now = now.Add(4 * time.Minute)
-	*model = replies{call("pods", `{}`), call("finish", `{"status":"fixed","summary":"s","fix":"Restarted gridtie"}`)}
+	*model = replies{call("pods", `{}`), call("restart", `{}`), call("finish", `{"status":"fixed","summary":"s","fix":"Restarted gridtie"}`)}
 	r.Tick(ctx)
 	if got, want := f.took(), "claim 2; record 2 query pods; close 2 fixed Restarted gridtie"; got != want {
 		t.Errorf("did %q, want %q", got, want)
@@ -514,5 +518,60 @@ func TestNoFindingsOfRehearsals(t *testing.T) {
 	r.check(ctx)
 	if got := f.took(); got != "open tuning Warnings: Unhealthy retrieval-api/pod/api" {
 		t.Errorf("opened %q", got)
+	}
+}
+
+func TestFixedWithoutAChange(t *testing.T) {
+	f := &fakeTremolo{}
+	awake := true
+	r, _ := newRunner(t, f, &replies{}, &awake)
+	res := agent.Result{Ended: "finish", Answer: `{"status":"fixed","summary":"The probe port is wrong."}`}
+	got := r.finish(context.Background(), tremolo.Investigation{ID: 3, Kind: "incident"}, res, nil, nil, &actionLog{}, nil)
+	if want := "escalate 3 upkeeper said this was fixed but made no change, so it isn't sure. The probe port is wrong."; got != "escalated" || f.took() != want {
+		t.Errorf("outcome %q", got)
+	}
+}
+
+func TestOverOnAYoungWorkload(t *testing.T) {
+	f := &fakeTremolo{}
+	awake := true
+	r, now := newRunner(t, f, &replies{}, &awake)
+	started := map[string]time.Time{"cache": now.Add(-10 * time.Minute), "tunnel": now.Add(-72 * time.Hour)}
+	r.Oldest = func(_ context.Context, ns string) (time.Time, error) { return started[ns], nil }
+	res := agent.Result{Decided: "over", Checkpoint: &agent.Checkpoint{Known: "it's healthy"}}
+	got := r.finish(context.Background(), tremolo.Investigation{ID: 5, Kind: "tuning", Title: "cache/cache memory keeps growing"}, res, nil, nil, &actionLog{}, nil)
+	if want := "escalate 5 upkeeper thought this had stopped over a day ago, but the pods in cache are only 10m0s old. Known: it's healthy."; got != "escalated" || f.took() != want {
+		t.Errorf("outcome %q", got)
+	}
+	for _, title := range []string{"tunnel/cloudflared restarts 11 times", "Disk is filling up", "unknown/x restarts"} {
+		if got := r.finish(context.Background(), tremolo.Investigation{ID: 6, Kind: "tuning", Title: title}, res, nil, nil, &actionLog{}, nil); got != "over" {
+			t.Errorf("%s: outcome %q", title, got)
+		}
+		f.took()
+	}
+}
+
+func TestStuckAfterSteppingBack(t *testing.T) {
+	f := &fakeTremolo{}
+	awake := true
+	r, _ := newRunner(t, f, &replies{}, &awake)
+	knows := &agent.Checkpoint{Known: "the probe checks 8080, the app listens on 8081", Missing: "-"}
+	unsure := &agent.Checkpoint{Known: "memory is 41MB", Missing: "what /app/run does"}
+	for _, c := range []struct {
+		kind string
+		cp   *agent.Checkpoint
+		want string
+		did  string
+	}{
+		{"incident", unsure, "escalated", "escalate 1 upkeeper went in circles (kept repeating runbook), but when it stepped back it had found: Known: memory is 41MB. Missing: what /app/run does."},
+		{"tuning", knows, "escalated", "escalate 1 upkeeper went in circles (kept repeating runbook), but when it stepped back it had found: Known: the probe checks 8080, the app listens on 8081."},
+		{"tuning", unsure, "stopped", "close 1 abandoned "},
+		{"incident", nil, "stopped", "escalate 1 upkeeper stopped without deciding (kept repeating runbook)."},
+	} {
+		res := agent.Result{Stopped: "kept repeating runbook", Checkpoint: c.cp}
+		got := r.finish(context.Background(), tremolo.Investigation{ID: 1, Kind: c.kind}, res, nil, nil, &actionLog{}, nil)
+		if did := f.took(); got != c.want || did != c.did {
+			t.Errorf("%s %v: outcome %q, did %q", c.kind, c.cp, got, did)
+		}
 	}
 }
