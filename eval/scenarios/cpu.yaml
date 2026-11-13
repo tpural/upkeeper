@@ -1,6 +1,21 @@
 name: cpu
 about: Batches are slow because a 50m CPU limit throttles the container; only metrics show why. Raising the limit is config, so a person.
 manifests: |
+  apiVersion: v1
+  kind: ConfigMap
+  metadata: {name: app}
+  data:
+    run: |
+      echo 'encoder: started';
+      while true;
+      do s=$(date +%s);
+      i=0;
+      while [ $i -lt 200000 ];
+      do i=$((i+1));
+      done;
+      echo "encoded batch in $(( $(date +%s) - s ))s (target 2s)";
+      done
+  ---
   apiVersion: apps/v1
   kind: Deployment
   metadata: {name: encoder}
@@ -13,8 +28,10 @@ manifests: |
         containers:
           - name: encoder
             image: busybox:1.37.0
-            command: ["sh", "-c", "echo 'encoder: started'; while true; do s=$(date +%s); i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done; echo \"encoded batch in $(( $(date +%s) - s ))s (target 2s)\"; done"]
+            command: ["sh", "/app/run"]
+            volumeMounts: [{name: app, mountPath: /app}]
             resources: {requests: {cpu: 10m, memory: 8Mi}, limits: {cpu: 50m}}
+        volumes: [{name: app, configMap: {name: app}}]
 ready: [kubectl -n $NS rollout status deploy/encoder --timeout=3m]
 settle: 6m
 open:

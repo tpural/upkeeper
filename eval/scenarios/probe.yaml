@@ -1,6 +1,13 @@
 name: probe
 about: The liveness probe checks port 8080 but the app listens on 8081, so it's killed every few seconds. The fix is the manifest, so a person; restarting or scaling won't help.
 manifests: |
+  apiVersion: v1
+  kind: ConfigMap
+  metadata: {name: app}
+  data:
+    run: |
+      mkdir -p /www && echo ok > /www/healthz && echo 'billing listening on :8081' && httpd -f -v -p 8081 -h /www
+  ---
   apiVersion: apps/v1
   kind: Deployment
   metadata: {name: billing}
@@ -13,9 +20,11 @@ manifests: |
         containers:
           - name: billing
             image: busybox:1.37.0
-            command: ["sh", "-c", "mkdir -p /www && echo ok > /www/healthz && echo 'billing listening on :8081' && httpd -f -v -p 8081 -h /www"]
+            command: ["sh", "/app/run"]
+            volumeMounts: [{name: app, mountPath: /app}]
             livenessProbe: {httpGet: {path: /healthz, port: 8080}, initialDelaySeconds: 5, periodSeconds: 5, failureThreshold: 2}
             resources: {requests: {cpu: 5m, memory: 8Mi}}
+        volumes: [{name: app, configMap: {name: app}}]
 settle: 3m
 open:
   kind: incident
