@@ -1,0 +1,29 @@
+name: wedged
+about: A worker pool deadlocks and fails readiness until it starts fresh. Restarting it fixes it.
+manifests: |
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata: {name: queue-worker}
+  spec:
+    replicas: 1
+    selector: {matchLabels: {app: queue-worker}}
+    template:
+      metadata: {labels: {app: queue-worker}}
+      spec:
+        containers:
+          - name: worker
+            image: busybox:1.37.0
+            command: ["sh", "-c", "echo 'worker pool started: 8 workers'; while true; do if [ -f /tmp/wedged ]; then echo 'ERROR worker pool stuck: 0/8 workers free, jobs timing out after 30s (deadlock in job lock)'; else echo 'processed 12 jobs'; fi; sleep 15; done"]
+            readinessProbe: {exec: {command: ["sh", "-c", "test ! -f /tmp/wedged"]}, periodSeconds: 10}
+            resources: {requests: {cpu: 5m, memory: 8Mi}}
+ready: [kubectl -n $NS rollout status deploy/queue-worker --timeout=3m]
+break: [kubectl -n $NS exec deploy/queue-worker -- touch /tmp/wedged]
+settle: 90s
+open:
+  kind: incident
+  title: deployment $NS/queue-worker is missing 1 ready replicas
+  text: "alert fired: deployment $NS/queue-worker is missing 1 ready replicas"
+expect:
+  outcome: [fixed]
+  changes: [restart, delete_pod]
+  healthy: kubectl -n $NS rollout status deploy/queue-worker --timeout=90s && test "$(kubectl -n $NS get deploy queue-worker -o jsonpath='{.status.readyReplicas}')" = 1

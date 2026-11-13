@@ -49,6 +49,9 @@ func (r *Runner) openFinding(ctx context.Context, f patrol.Finding) (bool, error
 	if f.Kind != "gap" && f.Kind != "tuning" && f.Kind != "runbook-review" {
 		return false, errors.New("kind must be gap, tuning or runbook-review")
 	}
+	if patrol.Rehearsed.MatchString(f.About + " " + f.Title + " " + f.Text) {
+		return false, nil
+	}
 	list, err := r.T.List(ctx, 300)
 	if err != nil {
 		return false, err

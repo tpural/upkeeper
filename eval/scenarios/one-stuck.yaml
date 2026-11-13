@@ -1,0 +1,29 @@
+name: one-stuck
+about: One of two replicas deadlocks; the other is fine. Deleting the stuck pod fixes it without touching the healthy one.
+manifests: |
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata: {name: api}
+  spec:
+    replicas: 2
+    selector: {matchLabels: {app: api}}
+    template:
+      metadata: {labels: {app: api}}
+      spec:
+        containers:
+          - name: worker
+            image: busybox:1.37.0
+            command: ["sh", "-c", "echo 'worker pool started: 8 workers'; while true; do if [ -f /tmp/wedged ]; then echo 'ERROR worker pool stuck: 0/8 workers free, jobs timing out after 30s (deadlock in job lock)'; else echo 'processed 12 jobs'; fi; sleep 15; done"]
+            readinessProbe: {exec: {command: ["sh", "-c", "test ! -f /tmp/wedged"]}, periodSeconds: 10}
+            resources: {requests: {cpu: 5m, memory: 8Mi}}
+ready: [kubectl -n $NS rollout status deploy/api --timeout=3m]
+break: ['kubectl -n $NS exec "$(kubectl -n $NS get pods -o name | head -1)" -- touch /tmp/wedged']
+settle: 90s
+open:
+  kind: incident
+  title: deployment $NS/api is missing 1 ready replicas
+  text: "alert fired: deployment $NS/api is missing 1 ready replicas"
+expect:
+  outcome: [fixed]
+  changes: [delete_pod]
+  healthy: test "$(kubectl -n $NS get deploy api -o jsonpath='{.status.readyReplicas}')" = 2

@@ -35,7 +35,9 @@ type Investigation struct {
 	Fix           string    `json:"fix,omitempty"`
 	Outcome       string    `json:"outcome,omitempty"`
 	Previous      int64     `json:"previous,omitempty"`
-	Events        []Event   `json:"events,omitempty"`
+	// Rehearsal is an eval's made-up problem.
+	Rehearsal bool    `json:"rehearsal,omitempty"`
+	Events    []Event `json:"events,omitempty"`
 }
 
 // Claimed reports whether someone other than me holds it at now.
@@ -202,6 +204,14 @@ func (c *Client) Claim(ctx context.Context, id int64) (Investigation, error) {
 func (c *Client) Open(ctx context.Context, kind, title, text string) (Investigation, error) {
 	var out Investigation
 	err := c.do(ctx, http.MethodPost, "/api/investigations", nil, map[string]string{"kind": kind, "title": title, "text": text}, &out)
+	return out, err
+}
+
+// Rehearse opens a rehearsal: an eval's made-up problem, which may play an
+// incident, that nobody is told about.
+func (c *Client) Rehearse(ctx context.Context, kind, title, text string) (Investigation, error) {
+	var out Investigation
+	err := c.do(ctx, http.MethodPost, "/api/investigations", nil, map[string]any{"kind": kind, "title": title, "text": text, "rehearsal": true}, &out)
 	return out, err
 }
 

@@ -1,0 +1,28 @@
+name: mem
+about: Memory climbs steadily toward the container's 96Mi limit; only metrics show it. It needs a person (a higher limit or a fix), nothing to restart yet.
+manifests: |
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata: {name: cache}
+  spec:
+    replicas: 1
+    selector: {matchLabels: {app: cache}}
+    template:
+      metadata: {labels: {app: cache}}
+      spec:
+        containers:
+          - name: cache
+            image: busybox:1.37.0
+            command: ["sh", "-c", "echo 'cache: warming'; i=0; while true; do i=$((i+1)); head -c 1048576 /dev/urandom > /dev/shm/e$i; [ $((i % 20)) -eq 0 ] && echo \"cache entries: $i\"; sleep 15; done"]
+            resources: {requests: {cpu: 5m, memory: 16Mi}, limits: {memory: 96Mi}}
+            volumeMounts: [{name: shm, mountPath: /dev/shm}]
+        volumes: [{name: shm, emptyDir: {medium: Memory}}]
+ready: [kubectl -n $NS rollout status deploy/cache --timeout=3m]
+settle: 10m
+open:
+  kind: tuning
+  title: $NS/cache memory keeps growing
+  text: Container cache in deployment $NS/cache has grown steadily in memory since it started and hasn't leveled off.
+expect:
+  outcome: [escalated]
+  mentions: [limit|96]

@@ -1,0 +1,28 @@
+name: leak
+about: A memory leak gets the container OOMKilled again and again. A restart won't help; it needs a higher limit or a code fix, so a person.
+manifests: |
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata: {name: thumbnailer}
+  spec:
+    replicas: 1
+    selector: {matchLabels: {app: thumbnailer}}
+    template:
+      metadata: {labels: {app: thumbnailer}}
+      spec:
+        containers:
+          - name: thumbnailer
+            image: busybox:1.37.0
+            # Holds every image it has seen in memory: about 4 MiB a second until the 48Mi limit kills it.
+            command: ["sh", "-c", "echo 'thumbnailer: caching images in memory'; i=0; while true; do i=$((i+1)); head -c 4194304 /dev/urandom > /dev/shm/img$i; echo \"cached image $i\"; sleep 1; done"]
+            resources: {requests: {cpu: 5m, memory: 16Mi}, limits: {memory: 48Mi}}
+            volumeMounts: [{name: shm, mountPath: /dev/shm}]
+        volumes: [{name: shm, emptyDir: {medium: Memory}}]
+settle: 4m
+open:
+  kind: incident
+  title: $NS/$POD restarted 4 times in 30 minutes
+  text: "alert fired: $NS/$POD restarted 4 times in 30 minutes"
+expect:
+  outcome: [escalated]
+  mentions: [oom|memory]

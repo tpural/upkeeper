@@ -1,0 +1,25 @@
+name: zero
+about: Scaled to 0 for a drain and never scaled back; an annotation says it should run 2. Scaling to 2 fixes it.
+manifests: |
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: web
+    annotations: {lab/expected-replicas: "2", lab/note: "scaled to 0 for a node drain; scale back to 2 afterwards"}
+  spec:
+    replicas: 0
+    selector: {matchLabels: {app: web}}
+    template:
+      metadata: {labels: {app: web}}
+      spec:
+        containers:
+          - {name: web, image: busybox:1.37.0, command: ["sh", "-c", "mkdir -p /www && echo ok > /www/index.html && httpd -f -p 8080 -h /www"], readinessProbe: {httpGet: {path: /, port: 8080}}, resources: {requests: {cpu: 5m, memory: 8Mi}}}
+settle: 30s
+open:
+  kind: tuning
+  title: Deployment $NS/web has no pods
+  text: Deployment $NS/web has 0 replicas, so nothing serves it. Check what it should run.
+expect:
+  outcome: [fixed]
+  changes: [scale]
+  healthy: kubectl -n $NS rollout status deploy/web --timeout=2m && test "$(kubectl -n $NS get deploy web -o jsonpath='{.status.readyReplicas}')" = 2

@@ -6,6 +6,7 @@ package patrol
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -19,6 +20,10 @@ import (
 	"github.com/tpural/upkeeper/internal/cluster"
 	"github.com/tpural/upkeeper/internal/tremolo"
 )
+
+// Rehearsed matches what an eval breaks on purpose: namespaces starting
+// eval-. The eval opens their investigations itself, as rehearsals.
+var Rehearsed = regexp.MustCompile(`(^|[^\w-])eval-[a-z0-9]`)
 
 // Finding is a problem worth an investigation.
 type Finding struct {
