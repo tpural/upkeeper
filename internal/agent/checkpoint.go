@@ -32,7 +32,7 @@ type Checkpoint struct {
 func (c Checkpoint) Summary() string {
 	var parts []string
 	for _, p := range [][2]string{{"Known", c.Known}, {"Tried", c.Tried}, {"Missing", c.Missing}} {
-		if s := strings.TrimSpace(p[1]); s != "" {
+		if s := strings.TrimSpace(p[1]); s != "" && s != "-" {
 			parts = append(parts, p[0]+": "+strings.TrimRight(s, ". ")+".")
 		}
 	}

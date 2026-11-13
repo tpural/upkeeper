@@ -42,6 +42,21 @@ func (c *Cluster) Awake(ctx context.Context, deployment string) (bool, error) {
 	return d.Status.ReadyReplicas > 0, nil
 }
 
+// Oldest is when a namespace's oldest pod started; zero if it has none.
+func (c *Cluster) Oldest(ctx context.Context, ns string) (time.Time, error) {
+	list, err := c.K.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return time.Time{}, err
+	}
+	var oldest time.Time
+	for _, p := range list.Items {
+		if t := p.CreationTimestamp.Time; !t.IsZero() && (oldest.IsZero() || t.Before(oldest)) {
+			oldest = t
+		}
+	}
+	return oldest, nil
+}
+
 // Pods lists a namespace's pods, problems first.
 func (c *Cluster) Pods(ctx context.Context, ns string) (string, error) {
 	list, err := c.K.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})

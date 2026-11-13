@@ -102,6 +102,7 @@ func run() error {
 		Checks:  checks.Check,
 		Log:     log,
 		Metrics: runner.NewMetrics(reg),
+		Oldest:  c.Oldest,
 	}
 	if cfg.Web.SearXNG != "" {
 		r.Web = web.New(cfg.Web.SearXNG, cfg.Web.Allow)
