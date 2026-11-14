@@ -324,6 +324,8 @@ type Runbook struct {
 	Body    string   `json:"body"`
 	Rules   []string `json:"rules"`
 	Version int      `json:"version"`
+	// Pending is an edit tremolo kept as a proposal for a person to approve.
+	Pending bool `json:"pending,omitempty"`
 }
 
 // Runbooks returns the runbooks covering rule.
