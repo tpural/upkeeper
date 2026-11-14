@@ -74,6 +74,9 @@ TREMOLO_URL=https://tremolo.example TREMOLO_TOKEN=... go run ./cmd/eval -runs 5 
 The model samples, so one run per scenario is noise: compare pass rates over several
 runs, with `-label` naming what changed. Results go to `eval/results/<time>/`.
 
+Scenarios are broken ahead of their turn, so each is done settling about when upkeeper is free for it; a run
+that waited past its settle time says how late it was. `-sequential` breaks each only after the one before.
+
 ## Configuration
 
 ```yaml
