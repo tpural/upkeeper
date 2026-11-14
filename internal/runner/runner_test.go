@@ -575,3 +575,19 @@ func TestStuckAfterSteppingBack(t *testing.T) {
 		}
 	}
 }
+
+func TestAbandonedOnAYoungWorkload(t *testing.T) {
+	f := &fakeTremolo{}
+	awake := true
+	r, now := newRunner(t, f, &replies{}, &awake)
+	r.Oldest = func(context.Context, string) (time.Time, error) { return now.Add(-10 * time.Minute), nil }
+	res := agent.Result{Ended: "finish", Answer: `{"status":"abandoned","summary":"The pod is new and healthy."}`}
+	got := r.finish(context.Background(), tremolo.Investigation{ID: 9, Kind: "tuning", Title: "eval-mem/cache memory keeps growing"}, res, nil, nil, &actionLog{}, nil)
+	if want := "escalate 9 upkeeper thought there was nothing to do, but the pods in eval-mem are only 10m0s old. The pod is new and healthy."; got != "escalated" || f.took() != want {
+		t.Errorf("outcome %q", got)
+	}
+	// An incident that resolved itself is still abandoned.
+	if got := r.finish(context.Background(), tremolo.Investigation{ID: 9, Kind: "incident", Title: "eval-mem/cache down"}, res, nil, nil, &actionLog{}, nil); got != "abandoned" {
+		t.Errorf("incident outcome %q", got)
+	}
+}

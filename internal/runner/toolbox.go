@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"time"
 
 	"github.com/tpural/upkeeper/internal/agent"
 	"github.com/tpural/upkeeper/internal/cluster"
@@ -23,10 +24,11 @@ func NewToolbox(t *tremolo.Client, c *cluster.Cluster, version string) Toolbox {
 		}
 		done := func() { _ = s.Close() }
 		if inv == nil {
-			return append(mcpTools(s, all, readTools), clusterReads(c)...), done, nil
+			return append(append(mcpTools(s, all, readTools), clusterReads(c)...), usageTool(c, t, time.Now)), done, nil
 		}
 		tools := mcpTools(s, all, readTools, workTools)
 		tools = append(tools, clusterReads(c)...)
+		tools = append(tools, usageTool(c, t, time.Now))
 		tools = append(tools, clusterActions(c, t, inv.ID, log)...)
 		tools = append(tools, record(t, inv.ID))
 		tools = append(tools, ending()...)
