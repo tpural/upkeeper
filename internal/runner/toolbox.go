@@ -26,7 +26,11 @@ func NewToolbox(t *tremolo.Client, c *cluster.Cluster, version string) Toolbox {
 		if inv == nil {
 			return append(append(mcpTools(s, all, readTools), clusterReads(c)...), usageTool(c, t, time.Now)), done, nil
 		}
-		tools := mcpTools(s, all, readTools, workTools)
+		work := workTools
+		if inv.Rehearsal {
+			work = nil // a made-up problem mustn't leave runbooks or silences behind
+		}
+		tools := mcpTools(s, all, readTools, work)
 		tools = append(tools, clusterReads(c)...)
 		tools = append(tools, usageTool(c, t, time.Now))
 		tools = append(tools, clusterActions(c, t, inv.ID, log)...)

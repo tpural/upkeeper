@@ -392,6 +392,9 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 			Sources                       []int
 		}
 		_ = json.Unmarshal([]byte(res.Answer), &f)
+		if inv.Rehearsal {
+			f.Runbook = "" // closing with a runbook writes the fix into it
+		}
 		defer r.keepSources(ctx, inv, f.Sources, refs, f.Runbook, "fixed", f.Fix)
 		if err := r.T.Close(ctx, inv.ID, f.Status, f.Summary, f.Fix, f.Runbook); err != nil && f.Runbook != "" {
 			err = r.T.Close(ctx, inv.ID, f.Status, f.Summary, f.Fix, "") // most likely a runbook it made up
