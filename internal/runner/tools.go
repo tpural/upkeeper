@@ -123,6 +123,8 @@ type actionLog struct {
 	changed, refused []string
 	// settled is the last change's workload coming back ready, if it did.
 	settled string
+	// nudged is a "fixed" without a change having been sent back once.
+	nudged bool
 }
 
 // settleFor is how long a change waits for its workload to be ready again.
@@ -281,7 +283,7 @@ func record(t *tremolo.Client, inv int64) agent.Tool {
 
 // ending tools: finish and escalate. They end the run; the runner closes the
 // investigation with what they were given.
-func ending() []agent.Tool {
+func ending(log *actionLog) []agent.Tool {
 	return []agent.Tool{
 		{
 			Name: "finish", Ends: true,
@@ -290,6 +292,13 @@ func ending() []agent.Tool {
 			Run: func(_ context.Context, a map[string]any) (string, error) {
 				if str(a, "status") == "fixed" && strings.TrimSpace(str(a, "fix")) == "" {
 					return "", errors.New("for status fixed, say the fix in one line")
+				}
+				if str(a, "status") == "fixed" && len(log.changed) == 0 && !log.nudged {
+					// A small model often decides on a change and then reports it
+					// done: tell it once, and the runner escalates a second try.
+					log.nudged = true
+					return "", errors.New("you haven't changed anything, so it isn't fixed yet. If you know the change that fixes it, make it now with its tool; " +
+						"if there was nothing to do, finish with status abandoned; otherwise escalate")
 				}
 				b, _ := json.Marshal(a)
 				return string(b), nil

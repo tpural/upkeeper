@@ -358,17 +358,37 @@ func TestPlanThenAct(t *testing.T) {
 		t.Errorf("temperatures %v, want %v", m.temps, want)
 	}
 
-	// Deciding to look doesn't unlock it, and it can't keep asking.
+	// Deciding to look doesn't unlock it; after looking twice it must decide
+	// fix or escalate, without looking again.
 	changed = nil
 	look := say(`{"known":"pods are wedged","tried":"pods","missing":"logs","next":"look","look_at":"pods in a","tool":"pods"}`)
 	m = &offered{script: script{replies: []llm.Message{
 		call("restart", `{"name":"api"}`), look,
 		call("restart", `{"name":"api"}`), look,
+		call("restart", `{"name":"api"}`), fix,
 		call("restart", `{"name":"api"}`),
+		call("finish", `{"fix":"restarted api"}`),
 	}}}
 	a.Model = m
 	res, err = a.Run(context.Background(), Task{Tools: append(tools(&calls), restart), MaxSteps: 20})
-	if err != nil || len(changed) != 0 || res.Stopped != "kept trying to make changes without deciding to" {
+	if err != nil || res.Ended != "finish" || !slices.Equal(changed, []string{"api"}) {
+		t.Errorf("result %+v, %v, changed %v", res, err, changed)
+	}
+	last := m.seen[5][len(m.seen[5])-1].Content
+	if !strings.Contains(last, "make the change or escalate") || strings.Contains(last, `"look"`) {
+		t.Errorf("final step back %q", last)
+	}
+
+	// Still not deciding to after that, it's stopped.
+	changed = nil
+	m = &offered{script: script{replies: []llm.Message{
+		call("restart", `{"name":"api"}`), look,
+		call("restart", `{"name":"api"}`), look,
+		call("restart", `{"name":"api"}`), say(`{"known":"k","tried":"t","missing":"","next":"look","look_at":"x","tool":"pods"}`),
+	}}}
+	a.Model = m
+	res, err = a.Run(context.Background(), Task{Tools: append(tools(&calls), restart), MaxSteps: 20})
+	if err != nil || len(changed) != 0 || !strings.HasPrefix(res.Stopped, "couldn't say what to do next") {
 		t.Errorf("result %+v, %v, changed %v", res, err, changed)
 	}
 }

@@ -35,7 +35,7 @@ func NewToolbox(t *tremolo.Client, c *cluster.Cluster, version string) Toolbox {
 		tools = append(tools, usageTool(c, t, time.Now))
 		tools = append(tools, clusterActions(c, t, inv.ID, log)...)
 		tools = append(tools, record(t, inv.ID))
-		tools = append(tools, ending()...)
+		tools = append(tools, ending(log)...)
 		return tools, done, nil
 	}
 }
