@@ -166,7 +166,6 @@ func (a *Agent) checkpoint(ctx context.Context, tracer trace.Tracer, msgs []llm.
 		return Checkpoint{}, undecided
 	}
 	c := majority(votes)
-	c = majority(votes)
 	if len(votes) > 1 {
 		nexts := make([]string, len(votes))
 		for i, v := range votes {
