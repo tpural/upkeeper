@@ -124,7 +124,7 @@ func (a *Agent) now() time.Time {
 // When the model is stepped back, and when it's stopped.
 const (
 	banFor      = 2 // steps a tool it's going round in circles with is taken away
-	maxGates    = 2 // times it may be stopped short of a change to step back
+	maxGates    = 2 // times a change may send it back to look first; then it decides fix or escalate
 	emptyCheck  = 4 // tool answers in a row that found nothing
 	emptyStop   = 9
 	maxChecks   = 2
@@ -243,7 +243,7 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			}
 		}
 		if gate != "" {
-			if gates >= maxGates {
+			if gates > maxGates {
 				res.Stopped = "kept trying to make changes without deciding to"
 				return res, nil
 			}
@@ -272,7 +272,13 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			checks++
 		}
 		offer := choices
-		if t.Search != nil && !searched {
+		if gate != "" && gates > maxGates {
+			// It keeps reaching for a change: looking more hasn't changed its
+			// mind, so it makes that change or hands it over.
+			offer = decisive(choices)
+			why += ": you've looked enough, so make the change or escalate"
+		}
+		if t.Search != nil && !searched && len(offer) == len(choices) {
 			offer = append(slices.Clone(choices), SearchChoice)
 		}
 		names := slices.Sorted(maps.Keys(byName))
@@ -333,6 +339,17 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 	}
 	res.Stopped = fmt.Sprintf("used all %d steps", t.MaxSteps)
 	return res, nil
+}
+
+// decisive are the choices that don't look any further.
+func decisive(choices []Choice) []Choice {
+	var out []Choice
+	for _, c := range choices {
+		if c.Name != "look" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // compactArgs is a call's arguments for a sentence.

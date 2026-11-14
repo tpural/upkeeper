@@ -47,6 +47,10 @@ look at one specific thing, or escalate. It's asked `model.votes` times, warm en
 and goes with what most chose. At most twice; then upkeeper escalates for it. Each step back is on
 the run's trace.
 
+With `model.plan`, a change also waits for a step back that decides on it. If it reaches for a change a third
+time after deciding to look, it has to choose: make the change or escalate. A `finish` saying "fixed" without a
+change is sent back once to make the change it meant.
+
 With `web.searxng` set, it may also choose to search the web, once. upkeeper cleans the query (addresses, ids,
 pod and node names, and `web.private` words are removed), searches, reads the top pages on `web.allow`
 domains, and has the model quote what answers its question; a quote that isn't on the page is dropped. The

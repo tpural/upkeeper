@@ -190,7 +190,7 @@ func newRunner(t *testing.T, f *fakeTremolo, model *replies, awake *bool) (*Runn
 					return "Done.", nil
 				}})
 				tools = append(tools, agent.Tool{Name: "record", Params: schema(""), Run: func(context.Context, map[string]any) (string, error) { return "Recorded.", nil }})
-				tools = append(tools, ending()...)
+				tools = append(tools, ending(log)...)
 			}
 			return tools, func() {}, nil
 		},
@@ -532,6 +532,30 @@ func TestFixedWithoutAChange(t *testing.T) {
 	got := r.finish(context.Background(), tremolo.Investigation{ID: 3, Kind: "incident"}, res, nil, nil, &actionLog{}, nil)
 	if want := "escalate 3 upkeeper said this was fixed but made no change, so it isn't sure. The probe port is wrong."; got != "escalated" || f.took() != want {
 		t.Errorf("outcome %q", got)
+	}
+}
+
+func TestFixedWithoutAChangeIsSentBack(t *testing.T) {
+	f := &fakeTremolo{}
+	awake := true
+	model := &replies{}
+	r, now := newRunner(t, f, model, &awake)
+	fixed := call("finish", `{"status":"fixed","summary":"s","fix":"Restarted it"}`)
+
+	// Told once that nothing changed, it makes the change.
+	f.invs = []tremolo.Investigation{{ID: 2, Kind: "incident", Title: "down", Status: "open", Opened: now.Add(-time.Hour)}}
+	*model = replies{fixed, call("restart", `{}`), fixed}
+	r.Tick(context.Background())
+	if got, want := f.took(), "claim 2; close 2 fixed Restarted it"; got != want {
+		t.Errorf("did %q, want %q", got, want)
+	}
+
+	// Saying it again is escalated.
+	f.invs = []tremolo.Investigation{{ID: 3, Kind: "incident", Title: "down", Status: "open", Opened: now.Add(-time.Hour)}}
+	*model = replies{fixed, fixed}
+	r.Tick(context.Background())
+	if got := f.took(); !strings.Contains(got, "escalate 3 upkeeper said this was fixed but made no change") {
+		t.Errorf("did %q", got)
 	}
 }
 

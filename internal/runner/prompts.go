@@ -35,7 +35,10 @@ Metric labels differ by source: k8s_* metrics use k8s_namespace_name and k8s_pod
 For memory, OOM kills, slowness or CPU, call usage first: it compares use with the limits, says how fast memory grows
 and when it reaches the limit, and how often CPU is throttled. A new pod whose memory keeps growing will hit its
 limit again: a young pod doesn't mean the problem is over.
-What a Kubernetes object is set to (replicas, autoscaling, probes, annotations saying why) comes from spec, rollout and pods, not metrics.`
+What a Kubernetes object is set to (replicas, autoscaling, probes, annotations saying why) comes from spec, rollout and pods, not metrics.
+A note that something was changed for a while (for a drain, maintenance or a migration) and should be put back
+afterwards isn't a reason to leave it: check whether that's over (nodes Ready and not cordoned, nothing in
+maintenance), and if it is, put it back the way the note says.`
 
 // DefaultPatrol is the built-in patrol prompt.
 const DefaultPatrol = `Nothing is firing. Look around the lab for trouble before it becomes an alert:
