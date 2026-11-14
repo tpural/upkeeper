@@ -87,6 +87,9 @@ type Result struct {
 	Said          string        `json:"said"`
 	Started       time.Time     `json:"started"`
 	Waited        time.Duration `json:"waited"`
+	// Late is how long it showed its problem beyond its settle time, waiting
+	// its turn: the scenario a run is tested on drifts with it.
+	Late time.Duration `json:"late,omitempty"`
 }
 
 func main() {
@@ -96,6 +99,8 @@ func main() {
 	label := flag.String("label", "", "what's being tried, e.g. temp-0.3, recorded with each result")
 	out := flag.String("out", "", "results directory; default eval/results/<time>")
 	timeout := flag.Duration("timeout", 30*time.Minute, "longest to wait for upkeeper on one run")
+	sequential := flag.Bool("sequential", false, "break each scenario only when the one before is done, not ahead of its turn")
+	slot := flag.Duration("slot", 90*time.Second, "first guess at how long upkeeper takes a run, for breaking scenarios ahead of their turn")
 	flag.Parse()
 
 	base, token := os.Getenv("TREMOLO_URL"), os.Getenv("TREMOLO_TOKEN")
@@ -125,25 +130,35 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	e := &evaluator{T: t, timeout: *timeout}
-	var results []Result
+	// Round robin, so a change in the cluster or model mid-eval touches every scenario alike.
+	var jobs []*job
 	for n := 1; n <= *runs; n++ {
-		// Round robin, so a change in the cluster or model mid-eval touches every scenario alike.
 		for _, s := range scenarios {
-			if ctx.Err() != nil {
-				break
-			}
-			r := e.run(ctx, s, n)
-			r.Label = *label
-			results = append(results, r)
-			b, _ := json.Marshal(r)
-			fmt.Fprintln(f, string(b))
-			mark := "PASS"
-			if !r.Pass {
-				mark = "FAIL " + strings.Join(r.Why, "; ")
-			}
-			fmt.Printf("%-12s run %d  #%d %-10s %2d steps %6d tokens %4.0fs  %s\n", s.Name, n, r.Investigation, r.Outcome, r.Steps, r.Tokens, r.Seconds, mark)
+			jobs = append(jobs, &job{s: s, n: n})
 		}
 	}
+	p := &pipeline{e: e, jobs: jobs, slot: *slot, sequential: *sequential}
+	var results []Result
+	for i := range jobs {
+		if ctx.Err() != nil {
+			break
+		}
+		r := p.work(ctx, i)
+		r.Label = *label
+		results = append(results, r)
+		b, _ := json.Marshal(r)
+		fmt.Fprintln(f, string(b))
+		mark := "PASS"
+		if !r.Pass {
+			mark = "FAIL " + strings.Join(r.Why, "; ")
+		}
+		late := ""
+		if r.Late > time.Minute {
+			late = fmt.Sprintf(" (late %s)", r.Late.Round(time.Second))
+		}
+		fmt.Printf("%-12s run %d  #%d %-10s %2d steps %6d tokens %4.0fs%s  %s\n", r.Scenario, r.Run, r.Investigation, r.Outcome, r.Steps, r.Tokens, r.Seconds, late, mark)
+	}
+	p.cleanup.Wait()
 	summary := summarize(results, *label)
 	fmt.Print("\n" + summary)
 	_ = os.WriteFile(filepath.Join(*out, "summary.md"), []byte(summary), 0o600)
@@ -201,19 +216,24 @@ type evaluator struct {
 	timeout time.Duration
 }
 
-// run sets s up, breaks it, has upkeeper work it, and scores what it did.
-func (e *evaluator) run(ctx context.Context, s Scenario, n int) Result {
-	r := Result{Scenario: s.Name, Run: n, Started: time.Now()}
+// prepared is a run whose scenario is broken, settling until shown.
+type prepared struct {
+	ns    string
+	env   []string
+	shown time.Time // when it's settled
+	err   Result    // a failed setup, when Outcome is set
+}
+
+// prepare sets s up in a namespace of its own and breaks it.
+func (e *evaluator) prepare(ctx context.Context, s Scenario, n int) prepared {
 	// A namespace of its own: metrics and logs of earlier runs mustn't look like this one's past.
-	ns := fmt.Sprintf("eval-%s-%x", s.Name, time.Now().Unix()%0x10000)
-	env := append(os.Environ(), "NS="+ns)
-	defer func() {
-		_ = sh(context.WithoutCancel(ctx), env, "kubectl delete namespace "+ns+" --ignore-not-found --wait --timeout=3m")
-	}()
-	broke := func(what string, err error) Result {
-		r.Outcome, r.Why = "setup", []string{what + ": " + err.Error()}
-		return r
+	ns := fmt.Sprintf("eval-%s-%04x%d", s.Name, time.Now().Unix()%0x10000, n)
+	p := prepared{ns: ns, env: append(os.Environ(), "NS="+ns)}
+	broke := func(what string, err error) prepared {
+		p.err = Result{Scenario: s.Name, Run: n, Started: time.Now(), Outcome: "setup", Why: []string{what + ": " + err.Error()}}
+		return p
 	}
+	env := p.env
 	if err := sh(ctx, env, "kubectl delete namespace "+ns+" --ignore-not-found --wait --timeout=3m && kubectl create namespace "+ns); err != nil {
 		return broke("namespace", err)
 	}
@@ -233,24 +253,42 @@ func (e *evaluator) run(ctx context.Context, s Scenario, n int) Result {
 		}
 	}
 	d, _ := settle(s)
-	if !sleep(ctx, d) {
-		return broke("settle", ctx.Err())
+	p.shown = time.Now().Add(d)
+	return p
+}
+
+// run has upkeeper work a prepared scenario, and scores what it did; tick is
+// called while it waits.
+func (e *evaluator) run(ctx context.Context, s Scenario, n int, p prepared, tick func()) Result {
+	if p.err.Outcome != "" {
+		return p.err
+	}
+	ns, env := p.ns, p.env
+	r := Result{Scenario: s.Name, Run: n, Started: time.Now()}
+	if late := time.Since(p.shown); late > 0 {
+		r.Late = late
+	} else if !sleep(ctx, -late) {
+		r.Outcome, r.Why = "setup", []string{"settle: " + ctx.Err().Error()}
+		return r
 	}
 	pod, _ := output(ctx, "kubectl", "-n", ns, "get", "pods", "-o", "jsonpath={.items[0].metadata.name}")
 	vars := map[string]string{"NS": ns, "POD": pod}
 	expand := func(v string) string { return os.Expand(v, func(k string) string { return vars[k] }) }
 	inv, err := e.T.Rehearse(ctx, s.Open.Kind, expand(s.Open.Title), expand(s.Open.Text))
 	if err != nil {
-		return broke("open", err)
+		r.Outcome, r.Why = "setup", []string{"open: " + err.Error()}
+		return r
 	}
 	r.Investigation = inv.ID
 	opened := time.Now()
+	r.Started = opened
 
 	// Wait for upkeeper to close or escalate it.
 	wait, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 	for inv.Status == "open" {
-		if !sleep(wait, 15*time.Second) {
+		tick()
+		if !sleep(wait, 5*time.Second) {
 			r.Outcome, r.Why = "timeout", []string{"upkeeper didn't finish in " + e.timeout.String()}
 			_, _ = e.closeIfOpen(context.WithoutCancel(ctx), inv.ID)
 			return r
