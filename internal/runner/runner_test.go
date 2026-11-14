@@ -122,8 +122,11 @@ func (f *fakeTremolo) Record(_ context.Context, id int64, kind, text string) err
 	return nil
 }
 
-func (f *fakeTremolo) Close(_ context.Context, id int64, status, _, fix, _ string) error {
+func (f *fakeTremolo) Close(_ context.Context, id int64, status, _, fix, runbook string) error {
 	f.log("close %d %s %s", id, status, fix)
+	if runbook != "" {
+		f.log("into runbook %s", runbook)
+	}
 	f.set(id, status)
 	return nil
 }
@@ -590,5 +593,21 @@ func TestAbandonedOnAYoungWorkload(t *testing.T) {
 	// An incident that resolved itself is still abandoned.
 	if got := r.finish(context.Background(), tremolo.Investigation{ID: 9, Kind: "incident", Title: "eval-mem/cache down"}, res, nil, nil, &actionLog{}, nil); got != "abandoned" {
 		t.Errorf("incident outcome %q", got)
+	}
+}
+
+func TestRehearsalsLeaveNoRunbook(t *testing.T) {
+	f := &fakeTremolo{}
+	awake := true
+	r, _ := newRunner(t, f, &replies{}, &awake)
+	res := agent.Result{Ended: "finish", Answer: `{"status":"fixed","summary":"Scaled back.","fix":"scaled web to 2","runbook":"new"}`}
+	changed := &actionLog{changed: []string{"scale"}}
+	r.finish(context.Background(), tremolo.Investigation{ID: 3, Kind: "incident", Rehearsal: true}, res, nil, nil, changed, nil)
+	if did := f.took(); strings.Contains(did, "runbook") {
+		t.Errorf("a rehearsal wrote a runbook: %q", did)
+	}
+	r.finish(context.Background(), tremolo.Investigation{ID: 4, Kind: "incident"}, res, nil, nil, changed, nil)
+	if did := f.took(); !strings.Contains(did, "into runbook new") {
+		t.Errorf("a real investigation didn't: %q", did)
 	}
 }
