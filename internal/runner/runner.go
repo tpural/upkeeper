@@ -439,10 +439,10 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 	why := "upkeeper stopped without deciding (" + res.Stopped + ")."
 	if c := res.Checkpoint; c != nil {
 		// It went in circles after stepping back, but what it knew then is a
-		// person's starting point: they get it if it's an incident, or if it
-		// said nothing was missing.
+		// person's starting point. What it says is missing is usually something
+		// no tool shows, like a script's source, so it doesn't hold that back.
 		why = "upkeeper went in circles (" + res.Stopped + "), but when it stepped back it had found: " + c.Summary()
-		if missing := strings.Trim(strings.TrimSpace(c.Missing), "-."); inv.Kind == "incident" || missing == "" {
+		if known := strings.Trim(strings.TrimSpace(c.Known), "-."); inv.Kind == "incident" || known != "" {
 			escalate(why)
 			return "escalated"
 		}

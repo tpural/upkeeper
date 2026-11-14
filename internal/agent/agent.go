@@ -100,6 +100,9 @@ type Agent struct {
 	// after it, and after the second: exploring early, committing later.
 	// Checkpoints use the last. Nil leaves the model's default.
 	Temperatures []float64
+	// Votes is how many times a checkpoint asks; it goes with the majority.
+	// Answers are sampled at the first of Temperatures so they can differ.
+	Votes int
 	// Plan holds changes back until the model has stepped back and decided to
 	// fix with that tool: it explores freely, but commits on purpose.
 	Plan bool
@@ -273,7 +276,12 @@ func (a *Agent) Run(ctx context.Context, t Task) (Result, error) {
 			offer = append(slices.Clone(choices), SearchChoice)
 		}
 		names := slices.Sorted(maps.Keys(byName))
-		c, err := a.checkpoint(a.temper(ctx, maxChecks), tracer, msgs, offer, names, why, &res)
+		// One answer is steadiest cool; votes need room to differ.
+		at := a.temper(ctx, maxChecks)
+		if a.Votes > 1 {
+			at = a.temper(ctx, 0)
+		}
+		c, err := a.checkpoint(at, tracer, msgs, offer, names, why, &res)
 		var stuck errNoDecision
 		if errors.As(err, &stuck) {
 			res.Stopped = stuck.Error()
