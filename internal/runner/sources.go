@@ -285,7 +285,8 @@ func (r *Runner) keepSources(ctx context.Context, inv tremolo.Investigation, cit
 		}
 	}
 	rb.Body = withSources(rb.Body, add)
-	if _, err := r.T.SaveRunbook(ctx, rb); err != nil {
+	saved, err := r.T.SaveRunbook(ctx, rb)
+	if err != nil {
 		r.fail("adding sources to runbook "+rb.ID, err)
 		return
 	}
@@ -293,7 +294,11 @@ func (r *Runner) keepSources(ctx context.Context, inv tremolo.Investigation, cit
 	for _, s := range add {
 		urls = append(urls, s.URL)
 	}
-	_ = r.T.Record(ctx, inv.ID, "change", fmt.Sprintf("Added to runbook %s's sources, unconfirmed until a fix from them holds: %s", rb.ID, strings.Join(urls, ", ")))
+	did := "Added to"
+	if saved.Pending {
+		did = "Proposed adding to"
+	}
+	_ = r.T.Record(ctx, inv.ID, "change", fmt.Sprintf("%s runbook %s's sources, unconfirmed until a fix from them holds: %s", did, rb.ID, strings.Join(urls, ", ")))
 }
 
 // checked is a source page's last check.
