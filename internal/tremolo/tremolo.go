@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -349,4 +350,38 @@ func (c *Client) SaveRunbook(ctx context.Context, rb Runbook) (Runbook, error) {
 	}
 	err := c.do(ctx, http.MethodPut, "/api/runbooks/"+url.PathEscape(rb.ID), nil, rb, &out)
 	return out, err
+}
+
+// Sample is one series of an instant metrics query.
+type Sample struct {
+	Labels map[string]string
+	Value  float64
+}
+
+// Query runs an instant PromQL query.
+func (c *Client) Query(ctx context.Context, promql string) ([]Sample, error) {
+	var res struct {
+		Data struct {
+			Result []struct {
+				Metric map[string]string `json:"metric"`
+				Value  []any             `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/api/metrics/query", url.Values{"query": {promql}}, nil, &res); err != nil {
+		return nil, err
+	}
+	out := make([]Sample, 0, len(res.Data.Result))
+	for _, r := range res.Data.Result {
+		if len(r.Value) != 2 {
+			continue
+		}
+		s, _ := r.Value[1].(string)
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			continue
+		}
+		out = append(out, Sample{r.Metric, v})
+	}
+	return out, nil
 }

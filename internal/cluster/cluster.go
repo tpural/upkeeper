@@ -928,3 +928,43 @@ func (c *Cluster) Replicas(ctx context.Context, ns, kind, name string) (int32, e
 	}
 	return 0, errors.New("kind must be deployment or statefulset")
 }
+
+// Container is one container's limits, and when its pod started.
+type Container struct {
+	Pod, Name string
+	Started   time.Time
+	// Memory is the limit in bytes, CPU in cores; 0 is none.
+	Memory, CPU float64
+}
+
+// Containers are the containers of a namespace's pods, or of one pod.
+func (c *Cluster) Containers(ctx context.Context, ns, pod string) ([]Container, error) {
+	var pods []corev1.Pod
+	if pod != "" {
+		p, err := c.K.CoreV1().Pods(ns).Get(ctx, pod, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		pods = []corev1.Pod{*p}
+	} else {
+		list, err := c.K.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		pods = list.Items
+	}
+	var out []Container
+	for _, p := range pods {
+		for _, ct := range p.Spec.Containers {
+			out = append(out, Container{
+				Pod: p.Name, Name: ct.Name, Started: p.CreationTimestamp.Time,
+				Memory: ct.Resources.Limits.Memory().AsApproximateFloat64(),
+				CPU:    ct.Resources.Limits.Cpu().AsApproximateFloat64(),
+			})
+		}
+	}
+	return out, nil
+}
+
+// Age is how long ago t was, short.
+func Age(now, t time.Time) string { return age(now, t) }

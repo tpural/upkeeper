@@ -379,6 +379,13 @@ func (r *Runner) finish(ctx context.Context, inv tremolo.Investigation, res agen
 		_ = json.Unmarshal([]byte(res.Answer), &f)
 		escalate("upkeeper said this was fixed but made no change, so it isn't sure. " + f.Summary)
 		return "escalated"
+	case res.Ended == "finish" && inv.Kind != "incident" && strings.Contains(res.Answer, `"status":"abandoned"`) && r.young(ctx, inv) != "":
+		// Nothing to do, about a workload that hasn't run a day: it can't know
+		// the problem's over, only that it hasn't happened yet this time.
+		var f struct{ Summary string }
+		_ = json.Unmarshal([]byte(res.Answer), &f)
+		escalate("upkeeper thought there was nothing to do, but " + r.young(ctx, inv) + ". " + f.Summary)
+		return "escalated"
 	case res.Ended == "finish":
 		var f struct {
 			Status, Summary, Fix, Runbook string
