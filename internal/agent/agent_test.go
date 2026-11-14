@@ -385,3 +385,49 @@ func TestNoPlanChangesAtOnce(t *testing.T) {
 		t.Errorf("result %+v, %v, changed %v", res, err, changed)
 	}
 }
+
+func TestVotes(t *testing.T) {
+	var changed []string
+	restart := Tool{Name: "restart", Changes: true, Params: json.RawMessage(`{}`), Run: func(_ context.Context, a map[string]any) (string, error) {
+		changed = append(changed, a["name"].(string))
+		return "Done.", nil
+	}}
+	var calls []string
+	escalate := say(`{"known":"the worker pool is deadlocked","tried":"pods","missing":"","next":"escalate","look_at":""}`)
+	fix := say(`{"known":"the worker pool is deadlocked","tried":"pods, logs","missing":"","next":"fix","look_at":"restart api","tool":"restart"}`)
+	m := &offered{script: script{replies: []llm.Message{
+		call("restart", `{"name":"api"}`),
+		escalate, fix, say(`not JSON`), fix,
+		call("restart", `{"name":"api"}`),
+		call("finish", `{"fix":"restarted api"}`),
+	}}}
+	a := &Agent{Model: m, Log: slog.New(slog.DiscardHandler), Plan: true, Votes: 3, Temperatures: []float64{0.7, 0.45, 0.2}}
+	res, err := a.Run(context.Background(), Task{Tools: append(tools(&calls), restart), MaxSteps: 20})
+	if err != nil || res.Ended != "finish" || res.Checkpoint.Next != "fix" || res.Checkpoint.Tried != "pods, logs" {
+		t.Fatalf("result %+v, %v", res, err)
+	}
+	if !slices.Equal(changed, []string{"api"}) {
+		t.Errorf("changed %v", changed)
+	}
+	// The votes are asked warm, so they can differ.
+	if want := []float64{0.7, 0.7, 0.7, 0.7, 0.7, 0.2, 0.2}; !slices.Equal(m.temps, want) {
+		t.Errorf("temperatures %v, want %v", m.temps, want)
+	}
+}
+
+func TestMajority(t *testing.T) {
+	cp := func(next, known string) Checkpoint { return Checkpoint{Next: next, Known: known} }
+	for _, c := range []struct {
+		votes []Checkpoint
+		want  Checkpoint
+	}{
+		{[]Checkpoint{cp("look", "1")}, cp("look", "1")},
+		{[]Checkpoint{cp("escalate", "1"), cp("fix", "2"), cp("fix", "3")}, cp("fix", "2")},
+		{[]Checkpoint{cp("escalate", "1"), cp("fix", "2")}, cp("escalate", "1")},
+		{[]Checkpoint{cp("fix", "1"), cp("look", "2"), cp("escalate", "3")}, cp("fix", "1")},
+	} {
+		if got := majority(c.votes); got != c.want {
+			t.Errorf("majority %v = %v, want %v", c.votes, got, c.want)
+		}
+	}
+}

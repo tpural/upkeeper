@@ -28,14 +28,16 @@ type pipeline struct {
 
 // work runs job i, starting the scenarios of later jobs as their turn nears.
 func (p *pipeline) work(ctx context.Context, i int) Result {
+	// A run's slot is its whole turn: waiting on its scenario, upkeeper
+	// picking it up and the run itself.
+	began := time.Now()
 	j := p.jobs[i]
 	p.start(ctx, j)
 	p.ahead(ctx, i, 0)
 	pr := <-j.ready
-	began := time.Now()
 	r := p.e.run(ctx, j.s, j.n, pr, func() { p.ahead(ctx, i, time.Since(began)) })
 	if r.Investigation != 0 {
-		p.took = append(p.took, time.Since(r.Started))
+		p.took = append(p.took, time.Since(began))
 	}
 	// Namespaces go in the background: the next run needn't wait for them.
 	p.cleanup.Go(func() {

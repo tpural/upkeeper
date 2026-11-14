@@ -565,7 +565,8 @@ func TestStuckAfterSteppingBack(t *testing.T) {
 	}{
 		{"incident", unsure, "escalated", "escalate 1 upkeeper went in circles (kept repeating runbook), but when it stepped back it had found: Known: memory is 41MB. Missing: what /app/run does."},
 		{"tuning", knows, "escalated", "escalate 1 upkeeper went in circles (kept repeating runbook), but when it stepped back it had found: Known: the probe checks 8080, the app listens on 8081."},
-		{"tuning", unsure, "stopped", "close 1 abandoned "},
+		{"tuning", unsure, "escalated", "escalate 1 upkeeper went in circles (kept repeating runbook), but when it stepped back it had found: Known: memory is 41MB. Missing: what /app/run does."},
+		{"tuning", &agent.Checkpoint{Known: "-", Missing: "everything"}, "stopped", "close 1 abandoned "},
 		{"incident", nil, "stopped", "escalate 1 upkeeper stopped without deciding (kept repeating runbook)."},
 	} {
 		res := agent.Result{Stopped: "kept repeating runbook", Checkpoint: c.cp}

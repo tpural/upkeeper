@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -118,33 +119,59 @@ func (a *Agent) checkpoint(ctx context.Context, tracer trace.Tracer, msgs []llm.
 	))
 	defer span.End()
 	ask := append(append([]llm.Message(nil), msgs...), llm.Message{Role: "user", Content: checkpointPrompt(choices, why, tools)})
-	var c Checkpoint
-	var last error
-	for range 2 {
-		var m llm.Message
-		var u llm.Usage
-		var err error
-		if j, ok := a.Model.(JSONChatter); ok {
-			m, u, err = j.ChatJSON(ctx, ask, checkpointSchema(choices, tools))
-		} else {
-			m, u, err = a.Model.Chat(ctx, ask, nil)
+	once := func() (Checkpoint, error) {
+		var c Checkpoint
+		var last error
+		for range 2 {
+			var m llm.Message
+			var u llm.Usage
+			var err error
+			if j, ok := a.Model.(JSONChatter); ok {
+				m, u, err = j.ChatJSON(ctx, ask, checkpointSchema(choices, tools))
+			} else {
+				m, u, err = a.Model.Chat(ctx, ask, nil)
+			}
+			if err != nil {
+				return c, err
+			}
+			res.Steps++
+			res.Tokens += u.Prompt + u.Completion
+			span.SetAttributes(attribute.Int("gen_ai.usage.input_tokens", u.Prompt), attribute.Int("gen_ai.usage.output_tokens", u.Completion),
+				attribute.String("upkeeper.said", clipRaw(m.Content, 4000)))
+			if last = parseCheckpoint(m.Content, choices, &c); last == nil {
+				return c, nil
+			}
+		}
+		return c, errNoDecision{last}
+	}
+	// One answer is a sample: with votes, it asks more than once and goes with
+	// what most answers chose, the first of them on a tie.
+	var votes []Checkpoint
+	var undecided error
+	for range max(1, a.Votes) {
+		c, err := once()
+		if errors.As(err, new(errNoDecision)) {
+			undecided = err
+			continue
 		}
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 			return c, err
 		}
-		res.Steps++
-		res.Tokens += u.Prompt + u.Completion
-		span.SetAttributes(attribute.Int("gen_ai.usage.input_tokens", u.Prompt), attribute.Int("gen_ai.usage.output_tokens", u.Completion),
-			attribute.String("upkeeper.said", clipRaw(m.Content, 4000)))
-		if last = parseCheckpoint(m.Content, choices, &c); last == nil {
-			break
-		}
+		votes = append(votes, c)
 	}
-	if last != nil {
-		span.SetStatus(codes.Error, last.Error())
-		return c, errNoDecision{last}
+	if len(votes) == 0 {
+		span.SetStatus(codes.Error, undecided.Error())
+		return Checkpoint{}, undecided
+	}
+	c := majority(votes)
+	if len(votes) > 1 {
+		nexts := make([]string, len(votes))
+		for i, v := range votes {
+			nexts[i] = v.Next
+		}
+		span.SetAttributes(attribute.StringSlice("upkeeper.checkpoint.votes", nexts))
 	}
 	span.SetAttributes(
 		attribute.String("upkeeper.checkpoint.known", c.Known),
@@ -187,6 +214,24 @@ func parseCheckpoint(s string, choices []Choice, c *Checkpoint) error {
 		}
 	}
 	return fmt.Errorf("next %q isn't one of the choices", c.Next)
+}
+
+// majority is the first answer whose choice most answers made.
+func majority(votes []Checkpoint) Checkpoint {
+	count := map[string]int{}
+	best := votes[0]
+	for _, v := range votes {
+		count[v.Next]++
+		if count[v.Next] > count[best.Next] {
+			best = v
+		}
+	}
+	for _, v := range votes {
+		if v.Next == best.Next {
+			return v
+		}
+	}
+	return best
 }
 
 func continues(choices []Choice, next string) bool {

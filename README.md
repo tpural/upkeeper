@@ -43,7 +43,8 @@ It's awake when `gpu.deployment` has a ready replica; reading that doesn't wake 
 
 When it repeats itself, keeps finding nothing, uses most of its steps or stops calling tools, upkeeper makes it
 step back: without tools, it says what it knows, what it tried, what's missing, and what it'll do next: fix,
-look at one specific thing, or escalate. At most twice; then upkeeper escalates for it. Each step back is on
+look at one specific thing, or escalate. It's asked `model.votes` times, warm enough that the answers can differ,
+and goes with what most chose. At most twice; then upkeeper escalates for it. Each step back is on
 the run's trace.
 
 With `web.searxng` set, it may also choose to search the web, once. upkeeper cleans the query (addresses, ids,
@@ -90,6 +91,7 @@ model:
   timeout: 15m                 # per investigation
   temperatures: [0.7, 0.45, 0.2] # before the 1st step back, after it, after the 2nd
   plan: true                   # a change waits until it has stepped back and decided on it
+  votes: 3                     # a step back asks this many times and goes with the majority
 gpu:
   deployment: llama-swap/llama-swap
   wakeDelay: 3m

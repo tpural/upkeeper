@@ -48,6 +48,9 @@ type Model struct {
 	// Plan holds changes back until the model has stepped back and decided
 	// on one; on unless false.
 	Plan *bool `json:"plan,omitempty"`
+	// Votes is how many times a step back asks the model, going with the
+	// majority. Zero means 3.
+	Votes int `json:"votes,omitempty"`
 }
 
 // GPU is what runs the model, and how often upkeeper may wake it.
@@ -137,6 +140,9 @@ func Parse(b []byte) (Config, error) {
 	if c.Model.Plan == nil {
 		plan := true
 		c.Model.Plan = &plan
+	}
+	if c.Model.Votes == 0 {
+		c.Model.Votes = 3
 	}
 	if c.Model.Temperatures == nil {
 		c.Model.Temperatures = []float64{0.7, 0.45, 0.2}
