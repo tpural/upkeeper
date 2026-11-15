@@ -4,22 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/fake"
-
 	"github.com/tpural/upkeeper/internal/agent"
-	"github.com/tpural/upkeeper/internal/cluster"
 	"github.com/tpural/upkeeper/internal/config"
 	"github.com/tpural/upkeeper/internal/llm"
 	"github.com/tpural/upkeeper/internal/patrol"
@@ -300,77 +292,79 @@ func TestPatrol(t *testing.T) {
 	}
 }
 
-// TestActions checks that each change is asked of tremolo first, and that a
-// refusal stops it.
-func TestActions(t *testing.T) {
-	settleFor = 50 * time.Millisecond
-	var mu sync.Mutex
-	var asked []string
-	refuse := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		asked = append(asked, r.Method+" "+r.URL.Path+" "+string(b))
-		mu.Unlock()
-		switch {
-		case refuse:
-			w.WriteHeader(http.StatusConflict)
-			_, _ = w.Write([]byte(`{"error":"over the disruptive budget: 2 this hour"}`))
-		case strings.HasSuffix(r.URL.Path, "/actions"):
-			_, _ = w.Write([]byte(`{"id":77}`))
-		default:
-			w.WriteHeader(http.StatusNoContent)
-		}
-	}))
-	defer srv.Close()
-	tc, _ := tremolo.New(srv.URL, "tok", "upkeeper")
-	k := fake.NewClientset(&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "gridtie", Namespace: "gridtie"}})
-	c := cluster.New(k)
-	log := &actionLog{}
-	restart := clusterActions(c, tc, 9, log)[0]
+// fakeKheck answers kheck's tools from a script, and remembers what it was asked.
+type fakeKheck struct {
+	answers []string
+	asked   []string
+}
 
-	out, err := restart.Run(context.Background(), map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie", "why": "stuck on old DNS"})
-	if err != nil || !strings.HasPrefix(out, "Done.") {
+func (f *fakeKheck) Call(_ context.Context, name string, args map[string]any) (string, bool, error) {
+	b, _ := json.Marshal(args)
+	f.asked = append(f.asked, name+" "+string(b))
+	a := f.answers[0]
+	f.answers = f.answers[1:]
+	return a, false, nil
+}
+
+// TestActions checks that changes are kheck's to make, and that its answers
+// reach the model and the escalation.
+func TestActions(t *testing.T) {
+	ctx := context.Background()
+	k := &fakeKheck{answers: []string{
+		`{"result":"done","settled":"deployment gridtie/gridtie has 1/1 ready after 9s.","ready":true}`,
+		`{"result":"refused","why":"tremolo: 409: over the disruptive budget"}`,
+		`{"result":"failed","why":"a new pod can't fix this: gridtie-1: c is ImagePullBackOff"}`,
+		`{"result":"failed","why":"it already wants 1; scaling isn't a way to restart"}`,
+		`{"result":"done"}`,
+	}}
+	log := &actionLog{}
+	tools := kheckActions(k, 9, log)
+	restart, scale, cordon := tools[0], tools[2], tools[3]
+	args := map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie", "why": "stuck on old DNS"}
+
+	out, err := restart.Run(ctx, args)
+	if err != nil || !strings.HasPrefix(out, "Done. deployment gridtie/gridtie has 1/1 ready") || !strings.Contains(out, "finish now") {
 		t.Fatalf("restart = %q, %v", out, err)
 	}
-	d, _ := k.AppsV1().Deployments("gridtie").Get(context.Background(), "gridtie", metav1.GetOptions{})
-	if d.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] == "" {
-		t.Error("not restarted")
+	if want := `restart {"investigation":9,"kind":"deployment","name":"gridtie","namespace":"gridtie","why":"stuck on old DNS"}`; k.asked[0] != want {
+		t.Errorf("asked %q, want %q", k.asked[0], want)
 	}
-	var begin map[string]any
-	_ = json.Unmarshal([]byte(strings.SplitN(asked[0], " ", 3)[2]), &begin)
-	if !strings.HasPrefix(asked[0], "POST /api/investigations/9/actions ") || begin["target"] != "deployment/gridtie" || begin["disruptive"] != true ||
-		asked[1] != `POST /api/investigations/9/actions/77 {"result":"done"}` {
-		t.Errorf("asked %v", asked)
+	if len(log.changed) != 1 || log.settled == "" {
+		t.Errorf("log %+v", log)
 	}
 
-	// Refused: nothing changes, and the model is told why.
-	refuse = true
-	asked = nil
-	if _, err := k.AppsV1().Deployments("gridtie").Update(context.Background(), &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "gridtie", Namespace: "gridtie"}}, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	out, err = restart.Run(context.Background(), map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie", "why": "again"})
-	d, _ = k.AppsV1().Deployments("gridtie").Get(context.Background(), "gridtie", metav1.GetOptions{})
-	if err != nil || !strings.Contains(out, "tremolo refused this: tremolo: 409: over the disruptive budget") || len(asked) != 1 || d.Spec.Template.Annotations != nil {
-		t.Errorf("refused: %q %v, asked %v, annotations %v", out, err, asked, d.Spec.Template.Annotations)
+	// Refused: the model is told not to work around it, and the escalation lists it.
+	out, err = restart.Run(ctx, args)
+	if err != nil || !strings.HasPrefix(out, "Refused: tremolo: 409: over the disruptive budget. Don't try") ||
+		!slices.Equal(log.refused, []string{"rollout restart gridtie/deployment/gridtie: tremolo: 409: over the disruptive budget"}) {
+		t.Errorf("refused: %q %v, log %+v", out, err, log)
 	}
 
-	// Never to zero.
-	scale := clusterActions(c, tc, 9, log)[2]
-	if _, err := scale.Run(context.Background(), map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie", "replicas": 0.0, "why": "prepare"}); err == nil {
-		t.Error("scaled to 0")
+	// Failed: the model reads why.
+	if _, err := restart.Run(ctx, args); err == nil || !strings.HasPrefix(err.Error(), "not done: a new pod can't fix this, gridtie-1") {
+		t.Errorf("hopeless: %v", err)
 	}
-
-	// Not to what it already has: that's no restart.
-	if _, err := scale.Run(context.Background(), map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie", "replicas": 1.0, "why": "restart it"}); err == nil ||
+	if _, err := scale.Run(ctx, map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie", "replicas": 1.0, "why": "restart it"}); err == nil ||
 		!strings.Contains(err.Error(), "already wants 1") {
 		t.Errorf("scaled to the same: %v", err)
 	}
 
-	// No why, no action.
-	if _, err := restart.Run(context.Background(), map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie"}); err == nil {
+	// Never to zero, and never without a why: kheck isn't even asked.
+	before := len(k.asked)
+	if _, err := scale.Run(ctx, map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie", "replicas": 0.0, "why": "prepare"}); err == nil {
+		t.Error("scaled to 0")
+	}
+	if _, err := restart.Run(ctx, map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie"}); err == nil {
 		t.Error("restarted without a why")
+	}
+	if len(k.asked) != before {
+		t.Errorf("asked kheck anyway: %v", k.asked[before:])
+	}
+
+	// cordon=false is kheck's uncordon.
+	if out, err := cordon.Run(ctx, map[string]any{"node": "w1", "cordon": false, "why": "drain done"}); err != nil || !strings.HasPrefix(out, "Done. Check") ||
+		!strings.HasPrefix(k.asked[len(k.asked)-1], "uncordon ") {
+		t.Errorf("uncordon %q %v %v", out, err, k.asked)
 	}
 }
 

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/tpural/upkeeper/internal/agent"
@@ -9,9 +10,10 @@ import (
 	"github.com/tpural/upkeeper/internal/tremolo"
 )
 
-// NewToolbox gives investigations tremolo's tools, the cluster's, and the
-// tools to record and end; patrols get only the tools for looking.
-func NewToolbox(t *tremolo.Client, c *cluster.Cluster, version string) Toolbox {
+// NewToolbox gives investigations tremolo's tools, the cluster's, kheck's
+// changes, and the tools to record and end; patrols get only the tools for
+// looking. Without kheck, nothing can be changed.
+func NewToolbox(t *tremolo.Client, c *cluster.Cluster, kheck, version string) Toolbox {
 	return func(ctx context.Context, inv *tremolo.Investigation, log *actionLog) ([]agent.Tool, func(), error) {
 		s, err := t.Connect(ctx, version)
 		if err != nil {
@@ -33,7 +35,15 @@ func NewToolbox(t *tremolo.Client, c *cluster.Cluster, version string) Toolbox {
 		tools := mcpTools(s, all, readTools, work)
 		tools = append(tools, clusterReads(c)...)
 		tools = append(tools, usageTool(c, t, time.Now))
-		tools = append(tools, clusterActions(c, t, inv.ID, log)...)
+		if kheck != "" {
+			k, err := t.ConnectTo(ctx, kheck, version)
+			if err != nil {
+				done()
+				return nil, nil, fmt.Errorf("kheck: %w", err)
+			}
+			done = func() { _ = s.Close(); _ = k.Close() }
+			tools = append(tools, kheckActions(k, inv.ID, log)...)
+		}
 		tools = append(tools, record(t, inv.ID))
 		tools = append(tools, ending(log)...)
 		return tools, done, nil

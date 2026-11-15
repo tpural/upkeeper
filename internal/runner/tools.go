@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/tpural/upkeeper/internal/agent"
 	"github.com/tpural/upkeeper/internal/cluster"
@@ -127,66 +127,62 @@ type actionLog struct {
 	nudged bool
 }
 
-// settleFor is how long a change waits for its workload to be ready again.
-var settleFor = 90 * time.Second
-
 // cantFix is what replacing pods can't fix, for the tools' descriptions.
 const cantFix = " It can't fix a wrong image or tag, missing config or env, a memory limit that's too low, the wrong CPU architecture, or scheduling: escalate those. Disruptive."
 
-// clusterActions are the Kubernetes changes. Each is checked before it's asked
-// of tremolo: its arguments, and whether a fresh pod could fix what's wrong.
-func clusterActions(c *cluster.Cluster, t *tremolo.Client, inv int64, log *actionLog) []agent.Tool {
-	act := func(ctx context.Context, a tremolo.Action, check func() error, do func() error, settle func() string) (string, error) {
-		if strings.TrimSpace(a.Why) == "" {
+// Caller runs a kheck tool.
+type Caller interface {
+	Call(ctx context.Context, name string, args map[string]any) (string, bool, error)
+}
+
+// kheckResult is how kheck says a change went.
+type kheckResult struct {
+	Result  string `json:"result"`
+	Why     string `json:"why"`
+	Settled string `json:"settled"`
+	Ready   bool   `json:"ready"`
+}
+
+// kheckActions are the Kubernetes changes, made by kheck: upkeeper has no
+// write access of its own. kheck checks each against its gates and records it
+// in tremolo as upkeeper.
+func kheckActions(k Caller, inv int64, log *actionLog) []agent.Tool {
+	act := func(ctx context.Context, tool, what string, a map[string]any) (string, error) {
+		if strings.TrimSpace(str(a, "why")) == "" {
 			return "", errors.New("say why: what you found that this should fix")
 		}
-		if err := check(); err != nil {
-			return "", err
-		}
-		ev, err := t.BeginAction(ctx, inv, a)
-		if tremolo.Refused(err) {
-			log.refused = append(log.refused, fmt.Sprintf("%s %s: %s", a.Action, a.Target, err))
-			return "tremolo refused this: " + err.Error() + ". Don't try to work around it; escalate, saying what you'd have done.", nil
-		}
+		args := maps.Clone(a)
+		args["investigation"] = inv
+		out, isErr, err := k.Call(ctx, tool, args)
 		if err != nil {
-			return "", agent.Fatal{Err: err}
+			return "", agent.Fatal{Err: fmt.Errorf("kheck: %w", err)}
 		}
-		result := "done"
-		if err := do(); err != nil {
-			result = "failed: " + err.Error()
+		var r kheckResult
+		if isErr || json.Unmarshal([]byte(out), &r) != nil {
+			return "", agent.Fatal{Err: fmt.Errorf("kheck %s: %s", tool, clip(out, 300))}
 		}
-		if err := t.EndAction(ctx, inv, ev, result); err != nil {
-			return "", agent.Fatal{Err: err}
-		}
-		if result != "done" {
-			return "", errors.New(strings.TrimPrefix(result, "failed: "))
-		}
-		where := a.Target
-		if a.Namespace != "" {
-			where = a.Namespace + "/" + a.Target
-		}
-		log.changed = append(log.changed, fmt.Sprintf("%s %s (why: %s)", a.Action, where, clip(a.Why, 200)))
-		if s := settle(); s != "" {
-			if !strings.Contains(s, "not settled") {
-				log.settled = s
-				return "Done. " + s + " That's the fix working: finish now with status fixed. The alert takes a few minutes to clear on its own; don't wait for it.", nil
+		switch r.Result {
+		case "refused":
+			log.refused = append(log.refused, what+": "+r.Why)
+			return "Refused: " + r.Why + ". Don't try to work around it; escalate, saying what you'd have done.", nil
+		case "failed":
+			if rest, ok := strings.CutPrefix(r.Why, "a new pod can't fix this: "); ok {
+				return "", errors.New("not done: a new pod can't fix this, " + rest + ". Escalate it, saying what you found")
 			}
-			return "Done. " + s, nil
+			return "", errors.New("not done: " + r.Why)
+		case "done":
+		default:
+			return "", agent.Fatal{Err: fmt.Errorf("kheck %s answered %q", tool, r.Result)}
+		}
+		log.changed = append(log.changed, fmt.Sprintf("%s (why: %s)", what, clip(str(a, "why"), 200)))
+		switch {
+		case r.Ready:
+			log.settled = r.Settled
+			return "Done. " + r.Settled + " That's the fix working: finish now with status fixed. The alert takes a few minutes to clear on its own; don't wait for it.", nil
+		case r.Settled != "":
+			return "Done. " + r.Settled, nil
 		}
 		return "Done. Check that it worked (rollout, pods, or the alert) before you finish.", nil
-	}
-	// fresh refuses replacing pods that would come back with the same problem.
-	fresh := func(ctx context.Context, ns, kind, name string) func() error {
-		return func() error {
-			why, err := c.Hopeless(ctx, ns, kind, name)
-			if err != nil {
-				return err
-			}
-			if why != "" {
-				return errors.New("not done: a new pod can't fix this, " + why + ". Escalate it, saying what you found")
-			}
-			return nil
-		}
 	}
 	kinds := func(kind string, allowed ...string) error {
 		if !slices.Contains(allowed, kind) {
@@ -200,13 +196,11 @@ func clusterActions(c *cluster.Cluster, t *tremolo.Client, inv int64, log *actio
 			Description: "Roll a workload's pods (kubectl rollout restart). Fixes a process that's wedged, deadlocked or stuck on stale state, in every pod." + cantFix,
 			Params:      schema(pNamespace+","+pKind+","+pName+","+pWhy, "namespace", "kind", "name", "why"),
 			Run: func(ctx context.Context, a map[string]any) (string, error) {
-				ns, kind, name := str(a, "namespace"), str(a, "kind"), str(a, "name")
-				if err := kinds(kind, "deployment", "statefulset", "daemonset"); err != nil {
+				if err := kinds(str(a, "kind"), "deployment", "statefulset", "daemonset"); err != nil {
 					return "", err
 				}
-				return act(ctx, tremolo.Action{Action: "rollout restart", Namespace: ns, Target: kind + "/" + name, Disruptive: true, Why: str(a, "why")},
-					fresh(ctx, ns, kind, name), func() error { return c.Restart(ctx, ns, kind, name) },
-					func() string { return c.Settle(ctx, ns, kind, name, settleFor) })
+				return act(ctx, "restart", "rollout restart "+str(a, "namespace")+"/"+str(a, "kind")+"/"+str(a, "name"),
+					map[string]any{"namespace": str(a, "namespace"), "kind": str(a, "kind"), "name": str(a, "name"), "why": str(a, "why")})
 			},
 		},
 		{
@@ -214,11 +208,8 @@ func clusterActions(c *cluster.Cluster, t *tremolo.Client, inv int64, log *actio
 			Description: "Delete one pod so its controller makes a fresh one. Fixes one wedged or stuck pod while the others are fine." + cantFix,
 			Params:      schema(pNamespace+`,"name":{"type":"string","description":"the pod's name"},`+pWhy, "namespace", "name", "why"),
 			Run: func(ctx context.Context, a map[string]any) (string, error) {
-				ns, name := str(a, "namespace"), str(a, "name")
-				kind, owner := c.Owner(ctx, ns, name)
-				return act(ctx, tremolo.Action{Action: "delete pod", Namespace: ns, Target: "pod/" + name, Disruptive: true, Why: str(a, "why")},
-					fresh(ctx, ns, "pod", name), func() error { return c.DeletePod(ctx, ns, name) },
-					func() string { return c.Settle(ctx, ns, kind, owner, settleFor) })
+				return act(ctx, "delete_pod", "delete pod "+str(a, "namespace")+"/pod/"+str(a, "name"),
+					map[string]any{"namespace": str(a, "namespace"), "name": str(a, "name"), "why": str(a, "why")})
 			},
 		},
 		{
@@ -227,41 +218,26 @@ func clusterActions(c *cluster.Cluster, t *tremolo.Client, inv int64, log *actio
 				"Not a way to restart, and never to stop a broken app. Disruptive.",
 			Params: schema(pNamespace+`,"kind":{"type":"string","enum":["deployment","statefulset"]},`+pName+`,"replicas":{"type":"integer","minimum":1,"maximum":10},`+pWhy, "namespace", "kind", "name", "replicas", "why"),
 			Run: func(ctx context.Context, a map[string]any) (string, error) {
-				ns, kind, name, n := str(a, "namespace"), str(a, "kind"), str(a, "name"), int32(num(a, "replicas"))
-				if err := kinds(kind, "deployment", "statefulset"); err != nil {
+				n := int(num(a, "replicas"))
+				if err := kinds(str(a, "kind"), "deployment", "statefulset"); err != nil {
 					return "", err
 				}
 				if n < 1 || n > 10 {
 					return "", errors.New("replicas must be 1 to 10: taking an app down isn't yours to do; escalate instead")
 				}
-				return act(ctx, tremolo.Action{Action: fmt.Sprintf("scale to %d", n), Namespace: ns, Target: kind + "/" + name, Disruptive: true, Why: str(a, "why")},
-					func() error {
-						have, err := c.Replicas(ctx, ns, kind, name)
-						switch {
-						case err != nil:
-							return err
-						case n == have:
-							return fmt.Errorf("not done: it already wants %d; scaling isn't a way to restart", n)
-						case n > have:
-							// More pods that can't start help nobody.
-							return fresh(ctx, ns, kind, name)()
-						}
-						return nil
-					}, func() error { return c.Scale(ctx, ns, kind, name, n) },
-					func() string { return c.Settle(ctx, ns, kind, name, settleFor) })
+				return act(ctx, "scale", fmt.Sprintf("scale to %d %s/%s/%s", n, str(a, "namespace"), str(a, "kind"), str(a, "name")),
+					map[string]any{"namespace": str(a, "namespace"), "kind": str(a, "kind"), "name": str(a, "name"), "replicas": n, "why": str(a, "why")})
 			},
 		},
 		{
 			Name: "cordon", Changes: true, Description: "Stop (cordon=true) or allow (cordon=false) new pods on a node. Doesn't move running pods.",
 			Params: schema(`"node":{"type":"string"},"cordon":{"type":"boolean"},`+pWhy, "node", "cordon", "why"),
 			Run: func(ctx context.Context, a map[string]any) (string, error) {
-				node, on := str(a, "node"), a["cordon"] == true
-				verb := "uncordon"
-				if on {
-					verb = "cordon"
+				tool := "uncordon"
+				if a["cordon"] == true {
+					tool = "cordon"
 				}
-				return act(ctx, tremolo.Action{Action: verb, Host: node, Target: "node/" + node, Why: str(a, "why")},
-					func() error { return nil }, func() error { return c.Cordon(ctx, node, on) }, func() string { return "" })
+				return act(ctx, tool, tool+" node/"+str(a, "node"), map[string]any{"node": str(a, "node"), "why": str(a, "why")})
 			},
 		},
 	}
