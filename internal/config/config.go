@@ -24,10 +24,17 @@ type Config struct {
 	Web Web `json:"web,omitzero"`
 	// Traces is where upkeeper sends a trace of each run; empty sends none.
 	Traces Traces `json:"traces,omitzero"`
+	// Kheck is where changes are made; without it upkeeper only looks and escalates.
+	Kheck Kheck `json:"kheck,omitzero"`
 	// Prompt replaces the built-in system prompt for investigations.
 	Prompt string `json:"prompt,omitempty"`
 	// Every is how often to look for work.
 	Every Duration `json:"every,omitempty"`
+}
+
+// Kheck is the MCP server that makes upkeeper's changes, with its tremolo token.
+type Kheck struct {
+	URL string `json:"url"`
 }
 
 // Tremolo is where upkeeper gets its work. The token comes from $TREMOLO_TOKEN.

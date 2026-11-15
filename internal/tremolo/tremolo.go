@@ -260,13 +260,23 @@ type Tool struct {
 // Session is a connection to tremolo's MCP server.
 type Session struct{ s *mcp.ClientSession }
 
-// Connect opens an MCP session with the client's token.
+// Connect opens an MCP session with tremolo, with the client's token.
 func (c *Client) Connect(ctx context.Context, version string) (*Session, error) {
-	client := mcp.NewClient(&mcp.Implementation{Name: "upkeeper", Version: version}, nil)
-	hc := &http.Client{Timeout: 2 * time.Minute, Transport: bearer{c.Token, http.DefaultTransport}}
-	s, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: c.URL.String() + "/mcp", HTTPClient: hc}, nil)
+	s, err := c.ConnectTo(ctx, c.URL.String()+"/mcp", version)
 	if err != nil {
 		return nil, fmt.Errorf("tremolo mcp: %w", err)
+	}
+	return s, nil
+}
+
+// ConnectTo opens an MCP session with another server that takes the
+// client's tremolo token, like kheck.
+func (c *Client) ConnectTo(ctx context.Context, endpoint, version string) (*Session, error) {
+	client := mcp.NewClient(&mcp.Implementation{Name: "upkeeper", Version: version}, nil)
+	hc := &http.Client{Timeout: 3 * time.Minute, Transport: bearer{c.Token, http.DefaultTransport}}
+	s, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: hc}, nil)
+	if err != nil {
+		return nil, err
 	}
 	return &Session{s}, nil
 }
