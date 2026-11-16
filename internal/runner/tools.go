@@ -135,6 +135,13 @@ type Caller interface {
 	Call(ctx context.Context, name string, args map[string]any) (string, bool, error)
 }
 
+// Recorder records actions on an investigation; tremolo may refuse one
+// (paused, over a budget, a protected host) before it's asked of kheck.
+type Recorder interface {
+	BeginAction(ctx context.Context, inv int64, a tremolo.Action) (int64, error)
+	EndAction(ctx context.Context, inv, event int64, result string) error
+}
+
 // kheckResult is how kheck says a change went.
 type kheckResult struct {
 	Result  string `json:"result"`
@@ -146,20 +153,39 @@ type kheckResult struct {
 // kheckActions are the Kubernetes changes, made by kheck: upkeeper has no
 // write access of its own. kheck checks each against its gates and records it
 // in tremolo as upkeeper.
-func kheckActions(k Caller, inv int64, log *actionLog) []agent.Tool {
-	act := func(ctx context.Context, tool, what string, a map[string]any) (string, error) {
+func kheckActions(k Caller, t Recorder, inv int64, log *actionLog) []agent.Tool {
+	act := func(ctx context.Context, tool string, rec tremolo.Action, a map[string]any) (string, error) {
 		if strings.TrimSpace(str(a, "why")) == "" {
 			return "", errors.New("say why: what you found that this should fix")
 		}
-		args := maps.Clone(a)
-		args["investigation"] = inv
-		out, isErr, err := k.Call(ctx, tool, args)
-		if err != nil {
-			return "", agent.Fatal{Err: fmt.Errorf("kheck: %w", err)}
+		rec.Why = str(a, "why")
+		what := rec.Action + " " + rec.Target
+		if rec.Namespace != "" {
+			what = rec.Action + " " + rec.Namespace + "/" + rec.Target
 		}
-		var r kheckResult
-		if isErr || json.Unmarshal([]byte(out), &r) != nil {
-			return "", agent.Fatal{Err: fmt.Errorf("kheck %s: %s", tool, clip(out, 300))}
+		ev, err := t.BeginAction(ctx, inv, rec)
+		if tremolo.Refused(err) {
+			log.refused = append(log.refused, what+": "+err.Error())
+			return "Refused: " + err.Error() + ". Don't try to work around it; escalate, saying what you'd have done.", nil
+		}
+		if err != nil {
+			return "", agent.Fatal{Err: err}
+		}
+		args := maps.Clone(a)
+		args["ref"] = fmt.Sprintf("investigation %d", inv)
+		r, err := callKheck(ctx, k, tool, args)
+		result := "done"
+		switch {
+		case err != nil:
+			result = "failed: " + err.Error()
+		case r.Result != "done":
+			result = r.Result + ": " + r.Why
+		}
+		if err := t.EndAction(context.WithoutCancel(ctx), inv, ev, result); err != nil {
+			return "", agent.Fatal{Err: err}
+		}
+		if err != nil {
+			return "", err
 		}
 		switch r.Result {
 		case "refused":
@@ -170,9 +196,6 @@ func kheckActions(k Caller, inv int64, log *actionLog) []agent.Tool {
 				return "", errors.New("not done: a new pod can't fix this, " + rest + ". Escalate it, saying what you found")
 			}
 			return "", errors.New("not done: " + r.Why)
-		case "done":
-		default:
-			return "", agent.Fatal{Err: fmt.Errorf("kheck %s answered %q", tool, r.Result)}
 		}
 		log.changed = append(log.changed, fmt.Sprintf("%s (why: %s)", what, clip(str(a, "why"), 200)))
 		switch {
@@ -199,7 +222,7 @@ func kheckActions(k Caller, inv int64, log *actionLog) []agent.Tool {
 				if err := kinds(str(a, "kind"), "deployment", "statefulset", "daemonset"); err != nil {
 					return "", err
 				}
-				return act(ctx, "restart", "rollout restart "+str(a, "namespace")+"/"+str(a, "kind")+"/"+str(a, "name"),
+				return act(ctx, "restart", tremolo.Action{Action: "rollout restart", Namespace: str(a, "namespace"), Target: str(a, "kind") + "/" + str(a, "name"), Disruptive: true},
 					map[string]any{"namespace": str(a, "namespace"), "kind": str(a, "kind"), "name": str(a, "name"), "why": str(a, "why")})
 			},
 		},
@@ -208,7 +231,7 @@ func kheckActions(k Caller, inv int64, log *actionLog) []agent.Tool {
 			Description: "Delete one pod so its controller makes a fresh one. Fixes one wedged or stuck pod while the others are fine." + cantFix,
 			Params:      schema(pNamespace+`,"name":{"type":"string","description":"the pod's name"},`+pWhy, "namespace", "name", "why"),
 			Run: func(ctx context.Context, a map[string]any) (string, error) {
-				return act(ctx, "delete_pod", "delete pod "+str(a, "namespace")+"/pod/"+str(a, "name"),
+				return act(ctx, "delete_pod", tremolo.Action{Action: "delete pod", Namespace: str(a, "namespace"), Target: "pod/" + str(a, "name"), Disruptive: true},
 					map[string]any{"namespace": str(a, "namespace"), "name": str(a, "name"), "why": str(a, "why")})
 			},
 		},
@@ -225,7 +248,7 @@ func kheckActions(k Caller, inv int64, log *actionLog) []agent.Tool {
 				if n < 1 || n > 10 {
 					return "", errors.New("replicas must be 1 to 10: taking an app down isn't yours to do; escalate instead")
 				}
-				return act(ctx, "scale", fmt.Sprintf("scale to %d %s/%s/%s", n, str(a, "namespace"), str(a, "kind"), str(a, "name")),
+				return act(ctx, "scale", tremolo.Action{Action: fmt.Sprintf("scale to %d", n), Namespace: str(a, "namespace"), Target: str(a, "kind") + "/" + str(a, "name"), Disruptive: true},
 					map[string]any{"namespace": str(a, "namespace"), "kind": str(a, "kind"), "name": str(a, "name"), "replicas": n, "why": str(a, "why")})
 			},
 		},
@@ -237,10 +260,28 @@ func kheckActions(k Caller, inv int64, log *actionLog) []agent.Tool {
 				if a["cordon"] == true {
 					tool = "cordon"
 				}
-				return act(ctx, tool, tool+" node/"+str(a, "node"), map[string]any{"node": str(a, "node"), "why": str(a, "why")})
+				return act(ctx, tool, tremolo.Action{Action: tool, Host: str(a, "node"), Target: "node/" + str(a, "node")}, map[string]any{"node": str(a, "node"), "why": str(a, "why")})
 			},
 		},
 	}
+}
+
+// callKheck asks kheck for a change. Not reaching kheck, or an answer it
+// can't read, ends the run.
+func callKheck(ctx context.Context, k Caller, tool string, args map[string]any) (kheckResult, error) {
+	var r kheckResult
+	out, isErr, err := k.Call(ctx, tool, args)
+	if err != nil {
+		return r, agent.Fatal{Err: fmt.Errorf("kheck: %w", err)}
+	}
+	if isErr || json.Unmarshal([]byte(out), &r) != nil {
+		return r, agent.Fatal{Err: fmt.Errorf("kheck %s: %s", tool, clip(out, 300))}
+	}
+	switch r.Result {
+	case "done", "refused", "failed":
+		return r, nil
+	}
+	return r, agent.Fatal{Err: fmt.Errorf("kheck %s answered %q", tool, r.Result)}
 }
 
 // record is the model writing to the investigation's timeline.

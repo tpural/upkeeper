@@ -32,9 +32,11 @@ type Config struct {
 	Every Duration `json:"every,omitempty"`
 }
 
-// Kheck is the MCP server that makes upkeeper's changes, with its tremolo token.
+// Kheck is the MCP server that makes upkeeper's changes. upkeeper connects
+// with a ServiceAccount token for kheck, projected into TokenFile.
 type Kheck struct {
-	URL string `json:"url"`
+	URL       string `json:"url"`
+	TokenFile string `json:"tokenFile,omitempty"`
 }
 
 // Tremolo is where upkeeper gets its work. The token comes from $TREMOLO_TOKEN.
@@ -156,6 +158,9 @@ func Parse(b []byte) (Config, error) {
 	}
 	if c.Patrol.Timezone == "" {
 		c.Patrol.Timezone = "Local"
+	}
+	if c.Kheck.URL != "" && c.Kheck.TokenFile == "" {
+		c.Kheck.TokenFile = "/var/run/secrets/kheck/token"
 	}
 	var errs []error
 	if c.Tremolo.URL == "" {
