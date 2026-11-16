@@ -306,19 +306,39 @@ func (f *fakeKheck) Call(_ context.Context, name string, args map[string]any) (s
 	return a, false, nil
 }
 
-// TestActions checks that changes are kheck's to make, and that its answers
-// reach the model and the escalation.
+// fakeRecorder records actions as tremolo would, refusing while refusing is set.
+type fakeRecorder struct {
+	did      []string
+	refusing bool
+}
+
+func (f *fakeRecorder) BeginAction(_ context.Context, inv int64, a tremolo.Action) (int64, error) {
+	if f.refusing {
+		return 0, &tremolo.Error{Code: 409, Msg: "agents are paused"}
+	}
+	f.did = append(f.did, fmt.Sprintf("begin %d %s %s why %s", inv, a.Action, a.Target, a.Why))
+	return 7, nil
+}
+
+func (f *fakeRecorder) EndAction(_ context.Context, inv, ev int64, result string) error {
+	f.did = append(f.did, fmt.Sprintf("end %d %d %s", inv, ev, result))
+	return nil
+}
+
+// TestActions checks that changes are recorded in tremolo and kheck's to
+// make, and that kheck's answers reach the model and the escalation.
 func TestActions(t *testing.T) {
 	ctx := context.Background()
 	k := &fakeKheck{answers: []string{
 		`{"result":"done","settled":"deployment gridtie/gridtie has 1/1 ready after 9s.","ready":true}`,
-		`{"result":"refused","why":"tremolo: 409: over the disruptive budget"}`,
+		`{"result":"refused","why":"gate \"one node at a time\": w2 is cordoned"}`,
 		`{"result":"failed","why":"a new pod can't fix this: gridtie-1: c is ImagePullBackOff"}`,
 		`{"result":"failed","why":"it already wants 1; scaling isn't a way to restart"}`,
 		`{"result":"done"}`,
 	}}
 	log := &actionLog{}
-	tools := kheckActions(k, 9, log)
+	rec := &fakeRecorder{}
+	tools := kheckActions(k, rec, 9, log)
 	restart, scale, cordon := tools[0], tools[2], tools[3]
 	args := map[string]any{"namespace": "gridtie", "kind": "deployment", "name": "gridtie", "why": "stuck on old DNS"}
 
@@ -326,18 +346,24 @@ func TestActions(t *testing.T) {
 	if err != nil || !strings.HasPrefix(out, "Done. deployment gridtie/gridtie has 1/1 ready") || !strings.Contains(out, "finish now") {
 		t.Fatalf("restart = %q, %v", out, err)
 	}
-	if want := `restart {"investigation":9,"kind":"deployment","name":"gridtie","namespace":"gridtie","why":"stuck on old DNS"}`; k.asked[0] != want {
+	if want := `restart {"kind":"deployment","name":"gridtie","namespace":"gridtie","ref":"investigation 9","why":"stuck on old DNS"}`; k.asked[0] != want {
 		t.Errorf("asked %q, want %q", k.asked[0], want)
 	}
 	if len(log.changed) != 1 || log.settled == "" {
 		t.Errorf("log %+v", log)
 	}
+	if got, want := strings.Join(rec.did, "; "), "begin 9 rollout restart deployment/gridtie why stuck on old DNS; end 9 7 done"; got != want {
+		t.Errorf("recorded %q, want %q", got, want)
+	}
 
 	// Refused: the model is told not to work around it, and the escalation lists it.
 	out, err = restart.Run(ctx, args)
-	if err != nil || !strings.HasPrefix(out, "Refused: tremolo: 409: over the disruptive budget. Don't try") ||
-		!slices.Equal(log.refused, []string{"rollout restart gridtie/deployment/gridtie: tremolo: 409: over the disruptive budget"}) {
+	if err != nil || !strings.HasPrefix(out, `Refused: gate "one node at a time": w2 is cordoned. Don't try`) ||
+		!slices.Equal(log.refused, []string{`rollout restart gridtie/deployment/gridtie: gate "one node at a time": w2 is cordoned`}) {
 		t.Errorf("refused: %q %v, log %+v", out, err, log)
+	}
+	if got := rec.did[len(rec.did)-1]; got != `end 9 7 refused: gate "one node at a time": w2 is cordoned` {
+		t.Errorf("recorded %q", got)
 	}
 
 	// Failed: the model reads why.
@@ -360,6 +386,14 @@ func TestActions(t *testing.T) {
 	if len(k.asked) != before {
 		t.Errorf("asked kheck anyway: %v", k.asked[before:])
 	}
+
+	// tremolo refusing (paused, over a budget) stops it before kheck.
+	rec.refusing = true
+	before = len(k.asked)
+	if out, err := restart.Run(ctx, args); err != nil || !strings.HasPrefix(out, "Refused: tremolo: 409: agents are paused") || len(k.asked) != before {
+		t.Errorf("paused: %q %v, asked %v", out, err, k.asked[before:])
+	}
+	rec.refusing = false
 
 	// cordon=false is kheck's uncordon.
 	if out, err := cordon.Run(ctx, map[string]any{"node": "w1", "cordon": false, "why": "drain done"}); err != nil || !strings.HasPrefix(out, "Done. Check") ||

@@ -269,11 +269,17 @@ func (c *Client) Connect(ctx context.Context, version string) (*Session, error) 
 	return s, nil
 }
 
-// ConnectTo opens an MCP session with another server that takes the
-// client's tremolo token, like kheck.
+// ConnectTo opens an MCP session with another server, with the client's
+// tremolo token.
 func (c *Client) ConnectTo(ctx context.Context, endpoint, version string) (*Session, error) {
+	return ConnectWith(ctx, endpoint, version, c.Token)
+}
+
+// ConnectWith opens an MCP session with a server that takes token, like
+// kheck with a ServiceAccount token.
+func ConnectWith(ctx context.Context, endpoint, version, token string) (*Session, error) {
 	client := mcp.NewClient(&mcp.Implementation{Name: "upkeeper", Version: version}, nil)
-	hc := &http.Client{Timeout: 3 * time.Minute, Transport: bearer{c.Token, http.DefaultTransport}}
+	hc := &http.Client{Timeout: 3 * time.Minute, Transport: bearer{token, http.DefaultTransport}}
 	s, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: hc}, nil)
 	if err != nil {
 		return nil, err

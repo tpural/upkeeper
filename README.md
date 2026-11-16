@@ -14,9 +14,10 @@ budgets, protected hosts) and the audit log; upkeeper only does the thinking and
    - tremolo's MCP tools for looking: metrics, logs, hosts, alerts, runbooks, coverage;
    - Kubernetes reads: pods, one pod's detail, container logs, warnings, rollouts;
    - a short list of changes: `restart`, `delete_pod`, `scale`, `cordon`. There's no shell.
-3. upkeeper can't change the cluster itself. Changes are made by [kheck](https://github.com/tpural/kheck), with
-   upkeeper's tremolo token: kheck checks each against its gates, records it in tremolo (so tremolo's rails
-   apply), makes it and waits for it to settle. A refusal is shown to the model, and nothing changes.
+3. upkeeper can't change the cluster itself. Each change is recorded in tremolo first (so tremolo's rails
+   apply: pause, budgets, protected hosts), then made by [kheck](https://github.com/tpural/kheck), which
+   upkeeper calls with a ServiceAccount token for kheck. kheck checks it against its gates, makes it and waits
+   for it to settle. A refusal from either is shown to the model, and nothing changes.
 4. Each tool call is recorded on the investigation's timeline. The run ends with the model's `finish` (fixed, with
    the fix in one line) or `escalate`. A model that repeats itself, stops using tools or runs out of steps or
    time is escalated automatically, with its last steps.
@@ -108,6 +109,7 @@ patrol:
     Nothing is firing. Look around the lab for trouble before it becomes an alert...
 kheck:
   url: http://kheck.kheck.svc:8080/mcp   # without it, upkeeper only looks and escalates
+  tokenFile: /var/run/secrets/kheck/token # a projected ServiceAccount token with audience kheck (the default)
 web:
   searxng: http://searxng.searxng.svc:8080
   allow: [kubernetes.io, fluxcd.io, github.com, stackoverflow.com]
@@ -124,4 +126,13 @@ runbook edits and silences, `write:runbooks` and `write:silences`.
 
 upkeeper only reads: get/list/watch pods, pods/log, events, nodes, namespaces, deployments, statefulsets,
 daemonsets, replicasets and HPAs. It needs no write access; kheck has that, and the API server limits kheck
-too. Give it nothing on secrets and no RBAC rights.
+too. Give it nothing on secrets and no RBAC rights. For kheck, project a token into the pod:
+
+```yaml
+volumes:
+  - name: kheck-token
+    projected:
+      sources:
+        - serviceAccountToken: {audience: kheck, path: token, expirationSeconds: 3600}
+# mounted at /var/run/secrets/kheck
+```
