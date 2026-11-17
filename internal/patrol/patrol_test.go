@@ -55,8 +55,12 @@ func TestCheck(t *testing.T) {
 	c := &Checker{
 		K: k, AsleepTaints: []string{"possum.dev/asleep"}, Now: func() time.Time { return now },
 		Coverage: func(context.Context) ([]tremolo.Gap, error) {
-			return []tremolo.Gap{{Kind: "logs", Subject: "namespace nfs", Detail: "no logs"}, {Kind: "logs", Subject: "namespace searxng", Detail: "no logs"},
-				{Kind: "check", Subject: "x", Detail: "failed"}, {Kind: "traces", Subject: "3 namespaces", Detail: "no traces"}}, nil
+			return []tremolo.Gap{
+				{Kind: "logs", Subject: "namespace nfs", Detail: "no logs"},
+				{Kind: "logs", Subject: "namespace searxng", Detail: "no logs"},
+				{Kind: "check", Subject: "x", Detail: "failed"},
+				{Kind: "traces", Subject: "3 namespaces", Detail: "no traces"},
+			}, nil
 		},
 		// searxng printed nothing, so its missing logs aren't a gap.
 		Printed: func(_ context.Context, ns string) (bool, error) { return ns != "searxng", nil },
