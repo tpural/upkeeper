@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/tpural/upkeeper/internal/agent"
 	"github.com/tpural/upkeeper/internal/cluster"
@@ -121,6 +122,9 @@ func clusterReads(c *cluster.Cluster) []agent.Tool {
 // actionLog is what a run's actions did, for its escalation.
 type actionLog struct {
 	changed, refused []string
+	// pause stops the run's clock while a person decides on an action, and
+	// returns how to start it again.
+	pause func() (resume func())
 	// settled is the last change's workload coming back ready, if it did.
 	settled string
 	// nudged is a "fixed" without a change having been sent back once.
@@ -136,11 +140,16 @@ type Caller interface {
 }
 
 // Recorder records actions on an investigation; tremolo may refuse one
-// (paused, over a budget, a protected host) before it's asked of kheck.
+// (paused, over a budget, a protected host) before it's asked of kheck, or
+// hold it for a person to approve.
 type Recorder interface {
-	BeginAction(ctx context.Context, inv int64, a tremolo.Action) (int64, error)
+	BeginAction(ctx context.Context, inv int64, a tremolo.Action) (tremolo.Event, error)
+	Await(ctx context.Context, inv, event int64, within time.Duration) (tremolo.Event, error)
 	EndAction(ctx context.Context, inv, event int64, result string) error
 }
+
+// approvalWait is how long a change waits for a person to approve it.
+var approvalWait = 30 * time.Minute
 
 // kheckResult is how kheck says a change went.
 type kheckResult struct {
@@ -163,7 +172,7 @@ func kheckActions(k Caller, t Recorder, inv int64, log *actionLog) []agent.Tool 
 		if rec.Namespace != "" {
 			what = rec.Action + " " + rec.Namespace + "/" + rec.Target
 		}
-		ev, err := t.BeginAction(ctx, inv, rec)
+		e, err := t.BeginAction(ctx, inv, rec)
 		if tremolo.Refused(err) {
 			log.refused = append(log.refused, what+": "+err.Error())
 			return "Refused: " + err.Error() + ". Don't try to work around it; escalate, saying what you'd have done.", nil
@@ -171,6 +180,22 @@ func kheckActions(k Caller, t Recorder, inv int64, log *actionLog) []agent.Tool 
 		if err != nil {
 			return "", agent.Fatal{Err: err}
 		}
+		if e.Kind == tremolo.Awaiting {
+			resume := func() {}
+			if log.pause != nil {
+				resume = log.pause()
+			}
+			e, err = t.Await(ctx, inv, e.ID, approvalWait)
+			resume()
+			if err != nil {
+				return "", agent.Fatal{Err: err}
+			}
+			if e.Kind != "action" {
+				log.refused = append(log.refused, what+": "+e.Kind+": "+e.Text)
+				return "Not approved (" + e.Kind + "): " + e.Text + ". Don't try to work around it; escalate, saying what you'd have done.", nil
+			}
+		}
+		ev := e.ID
 		args := maps.Clone(a)
 		args["ref"] = fmt.Sprintf("investigation %d", inv)
 		r, err := callKheck(ctx, k, tool, args)

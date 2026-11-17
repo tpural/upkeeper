@@ -305,8 +305,9 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 	defer r.set(func(s *Status) { s.Working = "" })
 	log.Info("working")
 
-	run, cancel := context.WithTimeout(ctx, r.Config.Model.Timeout.Duration)
+	run, cancel, pause := pausable(ctx, r.Config.Model.Timeout.Duration)
 	defer cancel()
+	actions.pause = pause
 	var findings []string
 	var refs []ref
 	var search func(context.Context, agent.Checkpoint) (string, error)
@@ -619,4 +620,27 @@ func cmp(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// pausable is a context that's cancelled after d of running time: pause
+// stops the clock (while a person decides on a change) until resumed.
+func pausable(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc, func() func()) {
+	run, cancel := context.WithCancel(ctx)
+	var mu sync.Mutex
+	left, since := d, time.Now()
+	t := time.AfterFunc(d, cancel)
+	pause := func() func() {
+		mu.Lock()
+		if t.Stop() {
+			left -= time.Since(since)
+		}
+		mu.Unlock()
+		return func() {
+			mu.Lock()
+			since = time.Now()
+			t.Reset(max(left, 0))
+			mu.Unlock()
+		}
+	}
+	return run, func() { t.Stop(); cancel() }, pause
 }

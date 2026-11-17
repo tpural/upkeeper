@@ -221,11 +221,49 @@ func (c *Client) Record(ctx context.Context, id int64, kind, text string) error 
 	return c.do(ctx, http.MethodPost, fmt.Sprintf("/api/investigations/%d/events", id), nil, map[string]string{"kind": kind, "text": text}, nil)
 }
 
-// BeginAction asks before a change; a refusal is an *Error that Refused reports.
-func (c *Client) BeginAction(ctx context.Context, id int64, a Action) (int64, error) {
+// BeginAction asks before a change; a refusal is an *Error that Refused
+// reports. An event of kind Awaiting needs a person's approval: see Await.
+func (c *Client) BeginAction(ctx context.Context, id int64, a Action) (Event, error) {
 	var e Event
 	err := c.do(ctx, http.MethodPost, fmt.Sprintf("/api/investigations/%d/actions", id), nil, a, &e)
-	return e.ID, err
+	return e, err
+}
+
+// Awaiting is an action waiting for a person's approval.
+const Awaiting = "awaiting"
+
+// awaitEvery is how often Await looks for a decision.
+var awaitEvery = 15 * time.Second
+
+// Await waits for a person to decide on an awaiting action, keeping the
+// claim, and returns the event as decided: kind action (approved), denied,
+// expired or refused. Not decided within, it's withdrawn.
+func (c *Client) Await(ctx context.Context, id, event int64, within time.Duration) (Event, error) {
+	deadline := time.Now().Add(within)
+	for {
+		i, err := c.Claim(ctx, id)
+		if err != nil {
+			return Event{}, err
+		}
+		for _, e := range i.Events {
+			if e.ID == event && e.Kind != Awaiting {
+				return e, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			var e Event
+			err := c.do(ctx, http.MethodPost, fmt.Sprintf("/api/investigations/%d/actions/%d/deny", id, event), nil, struct{}{}, &e)
+			if err == nil {
+				e.Kind = "expired"
+			}
+			return e, err
+		}
+		select {
+		case <-ctx.Done():
+			return Event{}, ctx.Err()
+		case <-time.After(awaitEvery):
+		}
+	}
 }
 
 // EndAction records how an action went.

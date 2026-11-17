@@ -17,7 +17,9 @@ budgets, protected hosts) and the audit log; upkeeper only does the thinking and
 3. upkeeper can't change the cluster itself. Each change is recorded in tremolo first (so tremolo's rails
    apply: pause, budgets, protected hosts), then made by [kheck](https://github.com/tpural/kheck), which
    upkeeper calls with a ServiceAccount token for kheck. kheck checks it against its gates, makes it and waits
-   for it to settle. A refusal from either is shown to the model, and nothing changes.
+   for it to settle. A refusal from either is shown to the model, and nothing changes. When tremolo holds a
+   change for a person's approval, upkeeper waits for the decision (up to 30 minutes, with the run's clock
+   stopped), and withdraws it if nobody decides.
 4. Each tool call is recorded on the investigation's timeline. The run ends with the model's `finish` (fixed, with
    the fix in one line) or `escalate`. A model that repeats itself, stops using tools or runs out of steps or
    time is escalated automatically, with its last steps.
