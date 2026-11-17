@@ -306,18 +306,28 @@ func (f *fakeKheck) Call(_ context.Context, name string, args map[string]any) (s
 	return a, false, nil
 }
 
-// fakeRecorder records actions as tremolo would, refusing while refusing is set.
+// fakeRecorder records actions as tremolo would, refusing while refusing is
+// set, and holding them for decided (a kind) while that is.
 type fakeRecorder struct {
 	did      []string
 	refusing bool
+	decided  string
 }
 
-func (f *fakeRecorder) BeginAction(_ context.Context, inv int64, a tremolo.Action) (int64, error) {
+func (f *fakeRecorder) BeginAction(_ context.Context, inv int64, a tremolo.Action) (tremolo.Event, error) {
 	if f.refusing {
-		return 0, &tremolo.Error{Code: 409, Msg: "agents are paused"}
+		return tremolo.Event{}, &tremolo.Error{Code: 409, Msg: "agents are paused"}
 	}
 	f.did = append(f.did, fmt.Sprintf("begin %d %s %s why %s", inv, a.Action, a.Target, a.Why))
-	return 7, nil
+	if f.decided != "" {
+		return tremolo.Event{ID: 7, Kind: tremolo.Awaiting}, nil
+	}
+	return tremolo.Event{ID: 7, Kind: "action"}, nil
+}
+
+func (f *fakeRecorder) Await(_ context.Context, inv, ev int64, _ time.Duration) (tremolo.Event, error) {
+	f.did = append(f.did, fmt.Sprintf("await %d %d", inv, ev))
+	return tremolo.Event{ID: ev, Kind: f.decided, Text: "it flaps (" + f.decided + " by tp)"}, nil
 }
 
 func (f *fakeRecorder) EndAction(_ context.Context, inv, ev int64, result string) error {
@@ -394,6 +404,25 @@ func TestActions(t *testing.T) {
 		t.Errorf("paused: %q %v, asked %v", out, err, k.asked[before:])
 	}
 	rec.refusing = false
+
+	// Held for a person: approved goes ahead, with the clock paused meanwhile; denied doesn't.
+	paused := 0
+	log.pause = func() func() { paused++; return func() { paused-- } }
+	rec.decided = "action"
+	k.answers = append(k.answers, `{"result":"done"}`, `{"result":"done"}`)
+	before = len(k.asked)
+	if out, err := cordon.Run(ctx, map[string]any{"node": "w1", "cordon": true, "why": "it flaps"}); err != nil || !strings.HasPrefix(out, "Done.") ||
+		len(k.asked) != before+1 || paused != 0 || !slices.Contains(rec.did, "await 9 7") {
+		t.Errorf("approved: %q %v, asked %v, paused %d, did %v", out, err, k.asked[before:], paused, rec.did)
+	}
+	rec.decided = "denied"
+	before = len(k.asked)
+	if out, err := cordon.Run(ctx, map[string]any{"node": "w1", "cordon": true, "why": "it flaps"}); err != nil ||
+		!strings.HasPrefix(out, "Not approved (denied): it flaps (denied by tp). Don't try") || len(k.asked) != before {
+		t.Errorf("denied: %q %v, asked %v", out, err, k.asked[before:])
+	}
+	rec.decided = ""
+	k.answers = k.answers[1:]
 
 	// cordon=false is kheck's uncordon.
 	if out, err := cordon.Run(ctx, map[string]any{"node": "w1", "cordon": false, "why": "drain done"}); err != nil || !strings.HasPrefix(out, "Done. Check") ||
@@ -661,5 +690,21 @@ func TestRehearsalsLeaveNoRunbook(t *testing.T) {
 	r.finish(context.Background(), tremolo.Investigation{ID: 4, Kind: "incident"}, res, nil, nil, changed, nil)
 	if did := f.took(); !strings.Contains(did, "into runbook new") {
 		t.Errorf("a real investigation didn't: %q", did)
+	}
+}
+
+func TestPausable(t *testing.T) {
+	ctx, cancel, pause := pausable(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	resume := pause()
+	time.Sleep(100 * time.Millisecond)
+	if ctx.Err() != nil {
+		t.Fatal("ran out while paused")
+	}
+	resume()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("didn't run out after resuming")
 	}
 }
