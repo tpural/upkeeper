@@ -39,6 +39,9 @@ type Checker struct {
 	K kubernetes.Interface
 	// Coverage returns tremolo's coverage gaps; nil skips them.
 	Coverage func(ctx context.Context) ([]tremolo.Gap, error)
+	// Printed reports whether a namespace's containers wrote any log lines
+	// in the last day; nil asks the cluster.
+	Printed func(ctx context.Context, ns string) (bool, error)
 	// AsleepTaints mark nodes that are down on purpose.
 	AsleepTaints []string
 	Now          func() time.Time
@@ -81,11 +84,42 @@ func (c *Checker) Check(ctx context.Context) []Finding {
 				if g.Kind == "check" || g.Kind == "traces" {
 					continue
 				}
+				// No logs from an app that printed nothing isn't a gap.
+				if ns, ok := strings.CutPrefix(g.Subject, "namespace "); ok && g.Kind == "logs" {
+					printed := c.Printed
+					if printed == nil {
+						printed = c.printed
+					}
+					if p, err := printed(ctx, ns); err == nil && !p {
+						continue
+					}
+				}
 				out = append(out, Finding{Kind: "gap", Title: fmt.Sprintf("Coverage: %s %s", g.Kind, g.Subject), Text: g.Detail})
 			}
 		}
 	}
 	return out
+}
+
+// printed asks each container in ns for a line of its last day's logs.
+func (c *Checker) printed(ctx context.Context, ns string) (bool, error) {
+	pods, err := c.K.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, err
+	}
+	day, one := int64(24*60*60), int64(1)
+	for _, p := range pods.Items {
+		for _, ct := range p.Spec.Containers {
+			b, err := c.K.CoreV1().Pods(ns).GetLogs(p.Name, &corev1.PodLogOptions{Container: ct.Name, SinceSeconds: &day, LimitBytes: &one}).DoRaw(ctx)
+			if err != nil {
+				return false, err
+			}
+			if len(b) > 0 {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // pods finds pods pending for a while, and containers restarting more since the last check.
