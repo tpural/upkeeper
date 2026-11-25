@@ -163,7 +163,7 @@ func (r *Runner) Tick(ctx context.Context) {
 		if due {
 			r.nextPatrol = r.patrolAfter(now)
 		}
-		r.patrol(ctx)
+		r.patrol(ctx, awake)
 	}
 }
 
@@ -319,7 +319,7 @@ func (r *Runner) work(ctx context.Context, inv tremolo.Investigation, awake bool
 		choices = append(slices.Clone(agent.Choices), agent.OverChoice)
 	}
 	res, err := r.Agent.Run(run, agent.Task{
-		System: cmp(r.Config.Prompt, System), User: brief(run, full, tools, r.past(ctx, full)) + r.reviewSources(ctx, full),
+		System: cmp(r.Config.Prompt, System), User: brief(run, r.Config.Name, full, tools, r.past(ctx, full)) + r.reviewSources(ctx, full),
 		Tools: tools, MaxSteps: r.Config.Model.MaxSteps, Search: search, Choices: choices,
 		OnCall: func(name string, args map[string]any, answer string) {
 			if name == "record" {
@@ -560,7 +560,7 @@ func ended(p tremolo.Investigation) string {
 	return p.Status + ": " + clip(p.Summary, 300)
 }
 
-func brief(ctx context.Context, inv tremolo.Investigation, tools []agent.Tool, past []tremolo.Investigation) string {
+func brief(ctx context.Context, self string, inv tremolo.Investigation, tools []agent.Tool, past []tremolo.Investigation) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Investigation #%d (%s): %s\n", inv.ID, inv.Kind, inv.Title)
 	if inv.Severity != "" {
@@ -569,11 +569,17 @@ func brief(ctx context.Context, inv tremolo.Investigation, tools []agent.Tool, p
 	if inv.Previous != 0 {
 		fmt.Fprintf(&b, "This alert was investigated before, as #%d; the alert tool shows what was done.\n", inv.Previous)
 	}
-	var notes []string
+	var notes, said []string
 	for _, e := range inv.Events {
-		if e.Kind != "query" {
+		switch {
+		case e.Kind == "note" && e.By != self:
+			said = append(said, fmt.Sprintf("- %s, %s: %s", e.By, e.Time.UTC().Format("Jan 2 15:04"), clip(e.Text, 1000)))
+		case e.Kind != "query":
 			notes = append(notes, fmt.Sprintf("- %s %s: %s", e.By, e.Kind, clip(e.Text, 400)))
 		}
+	}
+	if len(said) > 0 {
+		b.WriteString("\nA person said (answer this first; it's what they want from you):\n" + strings.Join(said, "\n") + "\n\n")
 	}
 	if len(notes) > 0 {
 		b.WriteString("Timeline so far:\n" + strings.Join(notes[max(0, len(notes)-10):], "\n") + "\n")

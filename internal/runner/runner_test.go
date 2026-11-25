@@ -708,3 +708,31 @@ func TestPausable(t *testing.T) {
 		t.Fatal("didn't run out after resuming")
 	}
 }
+
+func TestBriefPutsPeopleFirst(t *testing.T) {
+	at := time.Date(2026, 11, 24, 6, 31, 0, 0, time.UTC)
+	inv := tremolo.Investigation{ID: 7, Kind: "tuning", Title: "llama-swap memory growing", Events: []tremolo.Event{
+		{Kind: "finding", By: "upkeeper", Text: "25Gi and growing"},
+		{Kind: "note", By: "upkeeper", Text: "Searched the web"},
+		{Kind: "note", By: "admin", Time: at, Text: "Is this just scale up?"},
+	}}
+	got := brief(context.Background(), "upkeeper", inv, nil, nil)
+	said, timeline, _ := strings.Cut(got, "Timeline so far:")
+	if !strings.Contains(said, "A person said") || !strings.Contains(said, "- admin, Nov 24 06:31: Is this just scale up?") || strings.Contains(said, "Searched the web") {
+		t.Errorf("brief:\n%s", got)
+	}
+	if !strings.Contains(timeline, "Searched the web") || strings.Contains(timeline, "scale up") {
+		t.Errorf("timeline:\n%s", timeline)
+	}
+}
+
+func TestPatrolKnowsItWokeTheGPU(t *testing.T) {
+	r := &Runner{}
+	r.Config.GPU.Deployment = "llama-swap/llama-swap"
+	if got := r.woke(false); !strings.Contains(got, "llama-swap/llama-swap is loading its model") {
+		t.Errorf("asleep: %q", got)
+	}
+	if got := r.woke(true); got != "" {
+		t.Errorf("awake: %q", got)
+	}
+}

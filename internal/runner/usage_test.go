@@ -49,3 +49,21 @@ func TestUsage(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageWarmup(t *testing.T) {
+	now := time.Date(2026, 11, 13, 3, 0, 0, 0, time.UTC)
+	q := queries{
+		"deriv": 3 << 30 / 60.0,
+		"sum by (pod, container) (container_memory_working_set_bytes": 20 << 30,
+	}
+	for started, want := range map[time.Duration]bool{5 * time.Minute: true, time.Hour: false} {
+		cs := []cluster.Container{{Pod: "cache-1", Name: "cache", Started: now.Add(-started)}}
+		got, err := usage(context.Background(), q, "llm", "", cs, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(got, "still starting up") != want {
+			t.Errorf("started %s ago, warmup %v:\n%s", started, want, got)
+		}
+	}
+}

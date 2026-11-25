@@ -17,6 +17,9 @@ type Querier interface {
 	Query(ctx context.Context, promql string) ([]tremolo.Sample, error)
 }
 
+// warmup is how long a new pod's memory may climb while it loads.
+const warmup = 20 * time.Minute
+
 var kname = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
 
 // usageTool does the arithmetic a small model gets wrong: each container's
@@ -90,6 +93,8 @@ func usage(ctx context.Context, q Querier, ns, pod string, cs []cluster.Containe
 				fmt.Fprintf(&b, ", growing %s a minute", mib(g))
 				if ct.Memory > used {
 					fmt.Fprintf(&b, ": it reaches the limit in about %s", (time.Duration((ct.Memory-used)/(g/60)) * time.Second).Round(time.Minute))
+				} else if ct.Memory == 0 && now.Sub(ct.Started) < warmup {
+					b.WriteString(": it's still starting up, and growth this early without a limit is usually loading (a model, caches), not a leak")
 				}
 			} else if g < -512<<10 {
 				fmt.Fprintf(&b, ", falling %s a minute", mib(-g))
