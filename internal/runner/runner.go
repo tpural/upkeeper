@@ -76,6 +76,7 @@ type Runner struct {
 	lastChecks time.Time
 	lastPatrol time.Time
 	nextPatrol time.Time
+	poke       chan struct{}
 }
 
 // Status is what upkeeper is doing, for /status.
@@ -85,6 +86,7 @@ type Status struct {
 	LastChecks  time.Time `json:"lastChecks,omitzero"`
 	LastPatrol  time.Time `json:"lastPatrol,omitzero"`
 	PatrolSaid  string    `json:"patrolSaid,omitempty"`
+	PatrolAsked bool      `json:"patrolAsked,omitempty"`
 	Paused      string    `json:"paused,omitempty"`
 	LastError   string    `json:"lastError,omitempty"`
 	LastWorked  string    `json:"lastWorked,omitempty"`
@@ -115,12 +117,14 @@ func (r *Runner) Run(ctx context.Context) {
 	r.lastChecks = r.Now().Add(-r.Config.Patrol.Every.Duration + 2*time.Minute)
 	t := time.NewTicker(r.Config.Every.Duration)
 	defer t.Stop()
+	poke := r.poked()
 	for {
 		r.Tick(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		case <-poke:
 		}
 	}
 }
@@ -159,10 +163,12 @@ func (r *Runner) Tick(ctx context.Context) {
 		return
 	}
 	due := !r.nextPatrol.IsZero() && !now.Before(r.nextPatrol)
-	if due || awake && r.Config.Patrol.At != "" && now.Sub(r.lastPatrol) >= r.Config.Patrol.Every.Duration {
+	asked := r.Status().PatrolAsked
+	if due || asked || awake && r.Config.Patrol.At != "" && now.Sub(r.lastPatrol) >= r.Config.Patrol.Every.Duration {
 		if due {
 			r.nextPatrol = r.patrolAfter(now)
 		}
+		r.set(func(s *Status) { s.PatrolAsked, s.Working = false, "patrol" })
 		r.patrol(ctx, awake)
 	}
 }

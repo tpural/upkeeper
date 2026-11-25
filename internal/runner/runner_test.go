@@ -736,3 +736,33 @@ func TestPatrolKnowsItWokeTheGPU(t *testing.T) {
 		t.Errorf("awake: %q", got)
 	}
 }
+
+func TestAskPatrol(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeTremolo{}
+	model := &replies{}
+	awake := false
+	r, now := newRunner(t, f, model, &awake)
+	r.lastChecks = *now
+
+	if !r.AskPatrol() || r.AskPatrol() {
+		t.Fatal("a second ask should wait for the first")
+	}
+	// Investigations come first; the ask waits for them.
+	awake = true
+	f.invs = []tremolo.Investigation{{ID: 2, Kind: "incident", Title: "gridtie down", Status: "open", Opened: *now}}
+	*model = replies{call("finish", `{"status":"fixed","summary":"s","fix":"f"}`)}
+	r.Tick(ctx)
+	if !r.Status().PatrolAsked {
+		t.Fatalf("the ask was dropped while working an investigation: did %q, %+v", f.took(), r.Status())
+	}
+	f.invs = nil
+	*model = replies{call("done", `{"summary":"all clear"}`)}
+	r.Tick(ctx)
+	if s := r.Status(); s.PatrolAsked || s.PatrolSaid != "all clear" {
+		t.Errorf("status %+v", s)
+	}
+	if !r.AskPatrol() {
+		t.Error("can't ask again after it ran")
+	}
+}

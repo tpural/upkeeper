@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -128,6 +129,19 @@ func run() error {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(r.Status())
 	})
+	if token := os.Getenv("PATROL_TOKEN"); token != "" {
+		mux.HandleFunc("POST /patrol", func(w http.ResponseWriter, req *http.Request) {
+			if subtle.ConstantTimeCompare([]byte(req.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if !r.AskPatrol() {
+				http.Error(w, "a patrol is already asked for or running", http.StatusConflict)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+		})
+	}
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	srv := &http.Server{Addr: *admin, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
