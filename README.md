@@ -123,6 +123,9 @@ The tremolo token comes from `$TREMOLO_TOKEN`: an assistant token with read acce
 runbook edits and silences, `write:runbooks` and `write:silences`.
 
 `:9090` serves `/healthz`, `/status` (what it's doing, wakes today, the last patrol) and `/metrics`.
+With `$PATROL_TOKEN` set, `POST /patrol` with `Authorization: Bearer <token>` asks for a patrol now: it
+runs once the investigations waiting are done (and not while agents are paused), waking the GPU like the
+daily one. A second ask while one is waiting or running gets 409.
 
 ## Kubernetes permissions
 

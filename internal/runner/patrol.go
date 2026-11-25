@@ -146,6 +146,32 @@ func (r *Runner) woke(awake bool) string {
 		"its pods' memory climbing, restarts and warnings in the next 20 minutes are the wake. Don't open investigations about them."
 }
 
+// AskPatrol asks for a patrol once the investigations waiting are done. It's
+// false when one is already asked for or running.
+func (r *Runner) AskPatrol() bool {
+	poke := r.poked()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.status.PatrolAsked || r.status.Working == "patrol" {
+		return false
+	}
+	r.status.PatrolAsked = true
+	select {
+	case poke <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+func (r *Runner) poked() chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.poke == nil {
+		r.poke = make(chan struct{}, 1)
+	}
+	return r.poke
+}
+
 // patrolChoices are what a patrol may decide when it steps back.
 var patrolChoices = []agent.Choice{
 	{Name: "look", Meaning: "one specific check is worth making: say exactly what in look_at", Continue: true},
