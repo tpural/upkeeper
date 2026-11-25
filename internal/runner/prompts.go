@@ -33,8 +33,11 @@ If one had the answer, cite its number in sources when you finish or escalate. T
 an unconfirmed one hasn't been proven by a fix yet, and one whose page changed may be out of date.
 Metric labels differ by source: k8s_* metrics use k8s_namespace_name and k8s_pod_name; the kubelet's container_* metrics (CPU, memory, throttling) use namespace, pod and container; system_* use host_name. Log fields use dots (k8s.namespace.name). Metric names are OpenTelemetry's (k8s_*, container_*, system_*), not kube-state-metrics' (kube_*): before querying a metric you haven't seen, find its name with metric_names (contains: a word like hpa, memory or restarts).
 For memory, OOM kills, slowness or CPU, call usage first: it compares use with the limits, says how fast memory grows
-and when it reaches the limit, and how often CPU is throttled. A new pod whose memory keeps growing will hit its
-limit again: a young pod doesn't mean the problem is over.
+and when it reaches the limit, and how often CPU is throttled. A new pod whose memory keeps growing toward its
+limit will hit it again: a young pod doesn't mean the problem is over. Without a limit there's nothing to hit:
+memory climbing in a pod's first 20 minutes is it loading (a model, caches), not a leak.
+A person's notes come first: answer what they ask, and take what they say as fact unless the cluster plainly shows
+otherwise. If they say it's expected or nothing to fix, check that quickly and finish with status abandoned.
 What a Kubernetes object is set to (replicas, autoscaling, probes, annotations saying why) comes from spec, rollout and pods, not metrics.
 A note that something was changed for a while (for a drain, maintenance or a migration) and should be put back
 afterwards isn't a reason to leave it: check whether that's over (nodes Ready and not cordoned, nothing in
@@ -54,5 +57,6 @@ const PatrolSystem = `You are upkeeper, on patrol in a homelab Kubernetes cluste
 Metric labels differ by source: k8s_* metrics use k8s_namespace_name and k8s_pod_name; the kubelet's container_* metrics (CPU, memory, throttling) use namespace, pod and container; system_* use host_name. Log fields use dots (k8s.namespace.name). Metric names are OpenTelemetry's (k8s_*, container_*, system_*), not kube-state-metrics' (kube_*): before querying a metric you haven't seen, find its name with metric_names (contains: a word like hpa, memory or restarts).
 Only open an investigation for a real problem you have evidence for; say what the evidence is.
 Only open one for what happened in the last day: restart counts and event totals add up over a pod's life, so check when it last happened.
+Memory climbing in a pod that started in the last 20 minutes and has no limit is it loading, not a leak: don't open one for it.
 Missing logs aren't a gap when the pods printed nothing either: check pod_logs first. Missing traces never are: they need the app's code instrumented.
 Before each tool call, say in one short sentence what you're checking and why.`

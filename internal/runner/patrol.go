@@ -69,7 +69,7 @@ func (r *Runner) openFinding(ctx context.Context, f patrol.Finding) (bool, error
 }
 
 // patrol has the model look around with read-only tools.
-func (r *Runner) patrol(ctx context.Context) {
+func (r *Runner) patrol(ctx context.Context, awake bool) {
 	r.lastPatrol = r.Now()
 	ctx, span := r.start(ctx, "patrol", attribute.String("tremolo.task", "patrol"))
 	defer span.End()
@@ -110,7 +110,7 @@ func (r *Runner) patrol(ctx context.Context) {
 	run, cancel := context.WithTimeout(ctx, r.Config.Model.Timeout.Duration)
 	defer cancel()
 	res, err := r.Agent.Run(run, agent.Task{
-		System: PatrolSystem, User: cmp(r.Config.Patrol.Prompt, DefaultPatrol), Tools: tools, MaxSteps: r.Config.Model.MaxSteps,
+		System: PatrolSystem, User: cmp(r.Config.Patrol.Prompt, DefaultPatrol) + r.woke(awake), Tools: tools, MaxSteps: r.Config.Model.MaxSteps,
 		Choices: patrolChoices,
 	})
 	said, outcome := res.Answer, "all clear"
@@ -134,6 +134,16 @@ func (r *Runner) patrol(ctx context.Context) {
 	r.Log.Info("patrol done", "opened", opened, "steps", res.Steps, "said", clip(said, 500))
 	r.Metrics.Patrols.Inc()
 	r.set(func(s *Status) { s.LastPatrol, s.PatrolSaid = r.Now(), clip(said, 1000) })
+}
+
+// woke tells a patrol that it's waking the GPU's node, so what starts there
+// in the next minutes is the wake, not trouble.
+func (r *Runner) woke(awake bool) string {
+	if awake || r.Config.GPU.Deployment == "" {
+		return ""
+	}
+	return "\nThe GPU's node was asleep and is waking for this patrol (" + r.Config.GPU.Deployment + " is loading its model): " +
+		"its pods' memory climbing, restarts and warnings in the next 20 minutes are the wake. Don't open investigations about them."
 }
 
 // patrolChoices are what a patrol may decide when it steps back.
